@@ -232,26 +232,6 @@ def choose_same_expiry_leg(
     pool = [q for q in quotes if q["option_type"] == option_type and q["expiry_date"] == expiry]
     return choose_by_delta_target(pool, delta_target)
 
-def choose_calendar_far_leg_same_strike(
-    quotes: List[Dict[str, Any]],
-    option_type: str,
-    expiry: date,
-    reference_strike: float,
-) -> Optional[Dict[str, Any]]:
-    pool = [
-        q for q in quotes
-        if q["option_type"] == option_type
-        and q["expiry_date"] == expiry
-        and q["strike"] is not None
-    ]
-    if not pool:
-        return None
-
-    exact = [q for q in pool if q["strike"] == reference_strike]
-    if exact:
-        return exact[0]
-
-    return min(pool, key=lambda q: abs(q["strike"] - reference_strike))
 
 def choose_vertical_buy_leg(
     quotes: List[Dict[str, Any]],
@@ -277,6 +257,92 @@ def choose_vertical_buy_leg(
         return picked
 
     return min(candidates, key=lambda q: abs(q["strike"] - sell_strike))
+
+
+def choose_atm_like_leg(
+    quotes: List[Dict[str, Any]],
+    option_type: str,
+    expiry: date,
+    spot: float,
+) -> Optional[Dict[str, Any]]:
+    pool = [
+        q for q in quotes
+        if q["option_type"] == option_type
+        and q["expiry_date"] == expiry
+        and q["strike"] is not None
+        and spot is not None
+        and spot > 0
+    ]
+    if not pool:
+        return None
+
+    return min(pool, key=lambda q: abs(q["strike"] / spot - 1.0))
+
+
+def choose_same_strike_leg(
+    quotes: List[Dict[str, Any]],
+    option_type: str,
+    expiry: date,
+    strike: float,
+    delta_target: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    pool = [
+        q for q in quotes
+        if q["option_type"] == option_type
+        and q["expiry_date"] == expiry
+        and q["strike"] is not None
+    ]
+    if not pool:
+        return None
+
+    exact = [q for q in pool if q["strike"] == strike]
+    if exact:
+        if delta_target is not None:
+            picked = choose_by_delta_target(exact, delta_target)
+            if picked is not None:
+                return picked
+        return exact[0]
+
+    nearest_strike = min(pool, key=lambda q: abs(q["strike"] - strike))["strike"]
+    near_pool = [q for q in pool if q["strike"] == nearest_strike]
+
+    if delta_target is not None:
+        picked = choose_by_delta_target(near_pool, delta_target)
+        if picked is not None:
+            return picked
+    return near_pool[0] if near_pool else None
+
+
+def choose_calendar_near_leg(
+    near_quotes: List[Dict[str, Any]],
+    far_quotes: List[Dict[str, Any]],
+    option_type: str,
+    near_expiry: date,
+    far_expiry: date,
+    spot: float,
+) -> Optional[Dict[str, Any]]:
+    near_pool = [
+        q for q in near_quotes
+        if q["option_type"] == option_type
+        and q["expiry_date"] == near_expiry
+        and q["strike"] is not None
+    ]
+    far_pool = [
+        q for q in far_quotes
+        if q["option_type"] == option_type
+        and q["expiry_date"] == far_expiry
+        and q["strike"] is not None
+    ]
+
+    if not near_pool or not far_pool or spot is None or spot <= 0:
+        return None
+
+    far_strikes = {q["strike"] for q in far_pool}
+    matchable_near = [q for q in near_pool if q["strike"] in far_strikes]
+    if not matchable_near:
+        return None
+
+    return min(matchable_near, key=lambda q: abs(q["strike"] / spot - 1.0))
 
 
 def build_resolved_leg(q: Dict[str, Any], action: str, quantity: int = 1) -> ResolvedLeg:
@@ -318,14 +384,12 @@ def _get_leg_dte_bounds(strategy: StrategySpec, leg: StrategyLegSpec, leg_index:
     2) strategy.metadata 中 near/far dte
     3) strategy.constraints
     """
-    # 1) leg_constraints
     if getattr(leg, "leg_constraints", None) is not None:
         lc = leg.leg_constraints
         dte_min = lc.dte_min if lc.dte_min is not None else strategy.constraints.dte_min
         dte_max = lc.dte_max if lc.dte_max is not None else strategy.constraints.dte_max
         return dte_min, dte_max
 
-    # 2) metadata fallback
     md = strategy.metadata or {}
     if strategy.strategy_type in ("call_calendar", "put_calendar", "diagonal_call", "diagonal_put"):
         if leg_index == 0:
@@ -337,7 +401,6 @@ def _get_leg_dte_bounds(strategy: StrategySpec, leg: StrategyLegSpec, leg_index:
             dte_max = md.get("far_dte_max", strategy.constraints.dte_max)
             return int(dte_min), int(dte_max)
 
-    # 3) default
     return strategy.constraints.dte_min, strategy.constraints.dte_max
 
 
@@ -369,10 +432,14 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
 
     print(f"[resolver] strategy_type = {strategy.strategy_type}")
 
-    unique_option_types = sorted({str(q.get('option_type')) for q in quotes})
+    unique_option_types = sorted({str(q.get("option_type")) for q in quotes})
     print(f"[resolver] option types in DB = {unique_option_types}")
 
     resolved_legs: List[ResolvedLeg] = []
+
+    # calendar 预览用
+    calendar_second_filtered: Optional[List[Dict[str, Any]]] = None
+    calendar_second_expiry: Optional[date] = None
 
     # ===== 第一腿 =====
     first_leg_spec: StrategyLegSpec = strategy.legs[0]
@@ -384,7 +451,7 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
     print(f"[resolver] first leg filtered quotes = {len(first_filtered)}")
 
     if first_filtered:
-        expiries = sorted({q['expiry_date'].isoformat() for q in first_filtered if q.get('expiry_date') is not None})
+        expiries = sorted({q["expiry_date"].isoformat() for q in first_filtered if q.get("expiry_date") is not None})
         print(f"[resolver] first leg expiries = {expiries[:10]}")
         deltas = [q["delta"] for q in first_filtered if q.get("delta") is not None]
         if deltas:
@@ -399,15 +466,50 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
     if first_expiry is None:
         return None
 
-    first_leg_quote = choose_same_expiry_leg(
-        first_filtered,
-        option_type=first_leg_spec.option_type,
-        expiry=first_expiry,
-        delta_target=first_leg_spec.delta_target,
-    )
+    if strategy.strategy_type in ("call_calendar", "put_calendar"):
+        if len(strategy.legs) < 2:
+            return None
+
+        second_leg_spec: StrategyLegSpec = strategy.legs[1]
+        calendar_second_filtered = _filter_quotes_for_leg(quotes, strategy, second_leg_spec, 1)
+        calendar_second_grouped = group_by_expiry(calendar_second_filtered)
+        calendar_second_expiry = choose_expiry(
+            calendar_second_grouped,
+            second_leg_spec.expiry_rule,
+            reference_expiry=first_expiry,
+        )
+        print(f"[resolver] preview second_expiry = {calendar_second_expiry}")
+
+        if calendar_second_expiry is None:
+            return None
+
+        first_leg_quote = choose_calendar_near_leg(
+            near_quotes=first_filtered,
+            far_quotes=calendar_second_filtered,
+            option_type=first_leg_spec.option_type,
+            near_expiry=first_expiry,
+            far_expiry=calendar_second_expiry,
+            spot=spot,
+        )
+    elif strategy.strategy_type in ("diagonal_call", "diagonal_put"):
+        first_leg_quote = choose_atm_like_leg(
+            first_filtered,
+            option_type=first_leg_spec.option_type,
+            expiry=first_expiry,
+            spot=spot,
+        )
+    else:
+        first_leg_quote = choose_same_expiry_leg(
+            first_filtered,
+            option_type=first_leg_spec.option_type,
+            expiry=first_expiry,
+            delta_target=first_leg_spec.delta_target,
+        )
+
     print(f"[resolver] first_leg_quote found = {first_leg_quote is not None}")
     if first_leg_quote is None:
         return None
+
     print(f"[resolver] first_leg_quote strike = {first_leg_quote['strike']}, delta = {first_leg_quote['delta']}")
 
     resolved_legs.append(
@@ -425,44 +527,60 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
         print(f"[resolver] second leg option_type = {second_leg_spec.option_type}")
         print(f"[resolver] second leg dte range = {second_dte_min} ~ {second_dte_max}")
 
-        second_filtered = _filter_quotes_for_leg(quotes, strategy, second_leg_spec, 1)
-        print(f"[resolver] second leg filtered quotes = {len(second_filtered)}")
-
-        if second_filtered:
-            expiries = sorted({q['expiry_date'].isoformat() for q in second_filtered if q.get('expiry_date') is not None})
-            print(f"[resolver] second leg expiries = {expiries[:10]}")
-            deltas = [q["delta"] for q in second_filtered if q.get("delta") is not None]
-            if deltas:
-                print(f"[resolver] second leg delta min/max = {min(deltas)} / {max(deltas)}")
-
         if strategy.strategy_type in ("bear_call_spread", "bull_put_spread"):
-            if strategy.strategy_type in ("call_calendar", "put_calendar"):
-                second_leg_quote = choose_calendar_far_leg_same_strike(
-                    second_filtered,
-                    option_type=second_leg_spec.option_type,
-                    expiry=second_expiry,
-                    reference_strike=first_leg_quote["strike"],
-                )
-            else:
-                second_leg_quote = choose_same_expiry_leg(
-                    second_filtered,
-                    option_type=second_leg_spec.option_type,
-                    expiry=second_expiry,
-                    delta_target=second_leg_spec.delta_target,
-                )
+            second_leg_quote = choose_vertical_buy_leg(
+                quotes=first_filtered,
+                sell_leg=first_leg_quote,
+                delta_target=second_leg_spec.delta_target,
+            )
 
         else:
-            second_grouped = group_by_expiry(second_filtered)
-            second_expiry = choose_expiry(
-                second_grouped,
-                second_leg_spec.expiry_rule,
-                reference_expiry=first_expiry,
-            )
+            if strategy.strategy_type in ("call_calendar", "put_calendar"):
+                second_filtered = calendar_second_filtered or []
+                second_expiry = calendar_second_expiry
+
+                print(f"[resolver] second leg filtered quotes = {len(second_filtered)}")
+                if second_filtered:
+                    expiries = sorted({
+                        q["expiry_date"].isoformat()
+                        for q in second_filtered
+                        if q.get("expiry_date") is not None
+                    })
+                    print(f"[resolver] second leg expiries = {expiries[:10]}")
+                    deltas = [q["delta"] for q in second_filtered if q.get("delta") is not None]
+                    if deltas:
+                        print(f"[resolver] second leg delta min/max = {min(deltas)} / {max(deltas)}")
+
+            else:
+                second_filtered = _filter_quotes_for_leg(quotes, strategy, second_leg_spec, 1)
+                print(f"[resolver] second leg filtered quotes = {len(second_filtered)}")
+
+                if second_filtered:
+                    expiries = sorted({
+                        q["expiry_date"].isoformat()
+                        for q in second_filtered
+                        if q.get("expiry_date") is not None
+                    })
+                    print(f"[resolver] second leg expiries = {expiries[:10]}")
+                    deltas = [q["delta"] for q in second_filtered if q.get("delta") is not None]
+                    if deltas:
+                        print(f"[resolver] second leg delta min/max = {min(deltas)} / {max(deltas)}")
+
+                if not second_filtered:
+                    return None
+
+                second_grouped = group_by_expiry(second_filtered)
+                second_expiry = choose_expiry(
+                    second_grouped,
+                    second_leg_spec.expiry_rule,
+                    reference_expiry=first_expiry,
+                )
+
             print(f"[resolver] second_expiry = {second_expiry}")
             if second_expiry is None:
                 return None
 
-            if strategy.strategy_type in ("call_calendar", "put_calendar"):
+            if strategy.strategy_type in ("call_calendar", "put_calendar", "diagonal_call", "diagonal_put"):
                 second_leg_quote = choose_same_strike_leg(
                     second_filtered,
                     option_type=second_leg_spec.option_type,
@@ -481,6 +599,8 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
         print(f"[resolver] second_leg_quote found = {second_leg_quote is not None}")
         if second_leg_quote is None:
             return None
+
+        print(f"[resolver] second_leg_quote strike = {second_leg_quote['strike']}, delta = {second_leg_quote['delta']}")
 
         resolved_legs.append(
             build_resolved_leg(
@@ -503,20 +623,3 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
         rationale=strategy.rationale,
         metadata={"source": "strategy_resolver", "strategy_metadata": strategy.metadata},
     )
-
-def choose_same_strike_leg(
-    quotes: List[Dict[str, Any]],
-    option_type: str,
-    expiry: date,
-    strike: float,
-    delta_target: Optional[float] = None,
-) -> Optional[Dict[str, Any]]:
-    pool = [
-        q for q in quotes
-        if q["option_type"] == option_type
-        and q["expiry_date"] == expiry
-        and q["strike"] == strike
-    ]
-    if not pool:
-        return None
-    return choose_by_delta_target(pool, delta_target)
