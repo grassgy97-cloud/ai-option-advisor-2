@@ -459,15 +459,14 @@ def build_resolved_leg(q: dict, action: str, quantity: int = 1):
         option_type=q.get("option_type"),
         strike=q.get("strike"),
         expiry_date=expiry_date,
-        price=price,
         bid=bid,
         ask=ask,
         mid=mid,
-        iv=iv,
         delta=q.get("delta"),
         gamma=q.get("gamma"),
         theta=q.get("theta"),
         vega=q.get("vega"),
+        iv=iv,
         dte=dte,
     )
 

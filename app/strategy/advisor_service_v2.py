@@ -12,7 +12,8 @@ from app.models.schemas import (
 from app.strategy.compiler import compile_intent_to_strategies
 from app.strategy.strategy_ranker import rank_strategies
 from app.strategy.strategy_resolver import resolve_strategy
-from app.strategy.scanner_v2 import scan_calendar_spread_quotes
+from app.strategy.greeks_monitor import build_strategy_greeks_report
+
 
 def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec:
     """
@@ -101,20 +102,11 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
     )
 
 
-def build_placeholder_backtest(
-    resolved_candidates: List[ResolvedStrategy],
-    ) -> Dict[str, Any]:
+def build_disabled_backtest(resolved_candidates: List[ResolvedStrategy]) -> Dict[str, Any]:
     """
-    先占位，避免 /advisor/run 缺 backtest_result。
-    后续你再换成真实回测。
+    当前阶段暂不做期权回测。
+    backtest_result 仅保留接口占位与说明。
     """
-    if not resolved_candidates:
-        return {
-            "status": "no_candidate",
-            "summary": "没有可解析的候选策略，暂不执行回测。",
-            "items": [],
-        }
-
     items = []
     for s in resolved_candidates[:5]:
         items.append(
@@ -132,53 +124,24 @@ def build_placeholder_backtest(
                         "strike": leg.strike,
                         "mid": leg.mid,
                         "delta": leg.delta,
+                        "gamma": leg.gamma,
+                        "theta": leg.theta,
+                        "vega": leg.vega,
                         "iv": leg.iv,
                         "dte": leg.dte,
                     }
                     for leg in s.legs
                 ],
-                "backtest_stub": {
-                    "win_rate": None,
-                    "avg_return": None,
-                    "max_drawdown": None,
-                    "note": "尚未接入真实历史回测引擎",
-                },
+                "greeks_report": build_strategy_greeks_report(s),
             }
         )
 
     return {
-        "status": "placeholder",
-        "summary": "当前返回的是占位回测结果，主链路已打通。",
+        "status": "disabled",
+        "summary": "当前阶段暂不做期权回测，重点转向真实选腿、评分统一与 Greeks 监控。",
         "items": items,
     }
 
-def build_calendar_reason(row: dict) -> str:
-    iv_diff = row.get("iv_diff")
-    net_debit = row.get("net_debit_buy_far_sell_near")
-    moneyness = row.get("moneyness")
-    score = row.get("total_score")
-
-    parts = []
-
-    if iv_diff is not None:
-        if iv_diff < 0:
-            parts.append("远月隐波低于近月")
-        elif iv_diff > 0:
-            parts.append("远月隐波高于近月")
-
-    if moneyness is not None:
-        if abs(moneyness - 1.0) <= 0.1:
-            parts.append("组合位于近ATM区域")
-        else:
-            parts.append("组合偏离ATM")
-
-    if net_debit is not None:
-        parts.append(f"净权利金约为 {net_debit:.4f}")
-
-    if score is not None:
-        parts.append(f"综合评分 {score:.3f}")
-
-    return "，".join(parts) + "。"
 
 def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> AdvisorRunResponse:
     intent = parse_text_to_intent(text=text, underlying_id=underlying_id)
@@ -195,30 +158,7 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
             print(f"[run_advisor] resolve_strategy failed: {spec.strategy_type}, err={e}")
 
     ranked = rank_strategies(resolved)
-    backtest_result = build_placeholder_backtest(ranked)
-
-    # ===== 新增：quote-aware calendar 推荐 =====
-    calendar_recommendations = []
-    try:
-        cal_rows = scan_calendar_spread_quotes(engine, underlying_id, option_type="CALL")
-        for r in cal_rows[:3]:
-            calendar_recommendations.append({
-                "strategy_type": "calendar_spread",
-                "underlying_id": r["underlying_id"],
-                "option_type": r["option_type"],
-                "strike": r["strike"],
-                "near_expiry": r["near_expiry"],
-                "far_expiry": r["far_expiry"],
-                "near_contract_id": r["near_contract_id"],
-                "far_contract_id": r["far_contract_id"],
-                "net_debit": r["net_debit_buy_far_sell_near"],
-                "iv_diff": r["iv_diff"],
-                "moneyness": r.get("moneyness"),
-                "total_score": r["total_score"],
-                "reason": build_calendar_reason(r),
-            })
-    except Exception as e:
-        print(f"[run_advisor] scan_calendar_spread_quotes failed, err={e}")
+    backtest_result = build_disabled_backtest(ranked)
 
     resp = AdvisorRunResponse(
         parsed_intent=intent,
@@ -227,6 +167,6 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
         backtest_result=backtest_result,
     )
 
-    # 动态挂载，先不改 schema
-    resp.calendar_recommendations = calendar_recommendations
+    # 当前阶段收敛输出，不再维护平行的 calendar_recommendations 推荐链
+    resp.calendar_recommendations = []
     return resp

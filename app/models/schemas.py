@@ -117,6 +117,9 @@ class ResolvedLeg(BaseModel):
     ask: float
     mid: float
     delta: Optional[float] = None
+    gamma: Optional[float] = None
+    theta: Optional[float] = None
+    vega: Optional[float] = None
     iv: Optional[float] = None
     dte: Optional[int] = None
     quantity: int = 1
