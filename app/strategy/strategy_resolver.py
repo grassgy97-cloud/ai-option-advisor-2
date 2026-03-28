@@ -78,6 +78,37 @@ def quote_row_from_mapping(row: Dict[str, Any]) -> Dict[str, Any]:
         "vega": _safe_float(row.get("vega")),
     }
 
+def fetch_latest_option_quotes(engine, underlying_id: str) -> dict[str, dict]:
+    sql = text("""
+    WITH latest AS (
+      SELECT MAX(fetch_time) AS max_fetch_time
+      FROM option_quote_snapshots
+      WHERE underlying_id = :underlying_id
+    )
+    SELECT
+      contract_id,
+      bid_price1,
+      ask_price1,
+      bid_vol1,
+      ask_vol1,
+      fetch_time
+    FROM option_quote_snapshots
+    WHERE underlying_id = :underlying_id
+      AND fetch_time = (SELECT max_fetch_time FROM latest)
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"underlying_id": underlying_id}).mappings().all()
+
+    out = {}
+    for r in rows:
+        bid = r.get("bid_price1")
+        ask = r.get("ask_price1")
+        mid = (bid + ask) / 2 if bid is not None and ask is not None else None
+        out[str(r["contract_id"])] = {
+            **dict(r),
+            "mid_price": mid,
+        }
+    return out
 
 def fetch_latest_option_factors(engine: Engine, underlying_id: str) -> List[Dict[str, Any]]:
     sql = text(
@@ -116,6 +147,17 @@ def fetch_latest_option_factors(engine: Engine, underlying_id: str) -> List[Dict
 
     return [quote_row_from_mapping(dict(r)) for r in rows]
 
+def merge_factor_and_quote_rows(factor_rows, quote_rows: dict[str, dict]) -> list[dict]:
+    merged = []
+    for f in factor_rows:
+        contract_id = str(f["contract_id"])
+        q = quote_rows.get(contract_id, {})
+        merged.append({
+            **f,
+            **q,
+            "contract_id": contract_id,
+        })
+    return merged
 
 def fetch_latest_spot(engine: Engine, underlying_id: str) -> float:
     sql = text(
@@ -148,25 +190,63 @@ def fetch_latest_spot(engine: Engine, underlying_id: str) -> float:
 
 
 def filter_quotes_for_constraints(
-    quotes: List[Dict[str, Any]],
-    option_type: str,
-    dte_min: int,
-    dte_max: int,
-    max_rel_spread: float,
-) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+    quotes: list[dict],
+    option_type: str | None = None,
+    dte_min: int | None = None,
+    dte_max: int | None = None,
+    max_rel_spread: float | None = None,
+    min_quote_size: int | None = None,
+) -> list[dict]:
+    out = []
+
     for q in quotes:
-        if q["option_type"] != option_type:
+        if option_type and q.get("option_type") != option_type:
             continue
-        if q["contract_id"] is None:
+
+        dte = q.get("dte")
+        if dte is None:
+            dte = q.get("dte_calendar")
+
+        if dte is None:
             continue
-        if q["expiry_date"] is None or q["strike"] is None:
+        if dte_min is not None and dte < dte_min:
             continue
-        if q["price"] is None or q["price"] <= 0:
+        if dte_max is not None and dte > dte_max:
             continue
-        if q["dte"] is None or q["dte"] < dte_min or q["dte"] > dte_max:
+
+        price = q.get("price")
+        if price is None:
+            price = q.get("option_market_price")
+        if price is None or price <= 0:
             continue
+
+        bid = q.get("bid_price1")
+        ask = q.get("ask_price1")
+        bid_vol = q.get("bid_vol1")
+        ask_vol = q.get("ask_vol1")
+
+        # quote size 过滤
+        if min_quote_size is not None:
+            if bid_vol is None or ask_vol is None:
+                continue
+            if bid_vol < min_quote_size or ask_vol < min_quote_size:
+                continue
+
+        # spread 过滤
+        if max_rel_spread is not None:
+            if bid is None or ask is None or bid <= 0 or ask <= 0:
+                continue
+            mid = q.get("mid_price")
+            if mid is None:
+                mid = (bid + ask) / 2
+            if mid <= 0:
+                continue
+            rel_spread = (ask - bid) / mid
+            if rel_spread > max_rel_spread:
+                continue
+
         out.append(q)
+
     return out
 
 
@@ -345,21 +425,50 @@ def choose_calendar_near_leg(
     return min(matchable_near, key=lambda q: abs(q["strike"] / spot - 1.0))
 
 
-def build_resolved_leg(q: Dict[str, Any], action: str, quantity: int = 1) -> ResolvedLeg:
-    px = float(q["price"])
+def build_resolved_leg(q: dict, action: str, quantity: int = 1):
+    price = q.get("price")
+    if price is None:
+        price = q.get("option_market_price")
+
+    bid = q.get("bid_price1")
+    ask = q.get("ask_price1")
+    mid = q.get("mid_price")
+
+    if bid is None:
+        bid = price
+    if ask is None:
+        ask = price
+    if mid is None:
+        mid = price
+
+    iv = q.get("iv")
+    if iv is None:
+        iv = q.get("implied_vol")
+
+    dte = q.get("dte")
+    if dte is None:
+        dte = q.get("dte_calendar")
+
+    expiry_raw = q.get("expiry_date")
+    expiry_date = expiry_raw.isoformat() if expiry_raw is not None else None
+
     return ResolvedLeg(
-        contract_id=q["contract_id"],
+        contract_id=str(q["contract_id"]),
         action=action,
-        option_type=q["option_type"],
-        expiry_date=q["expiry_date"].isoformat(),
-        strike=float(q["strike"]),
-        bid=px,
-        ask=px,
-        mid=px,
-        delta=q["delta"],
-        iv=q["iv"],
-        dte=q["dte"],
         quantity=quantity,
+        option_type=q.get("option_type"),
+        strike=q.get("strike"),
+        expiry_date=expiry_date,
+        price=price,
+        bid=bid,
+        ask=ask,
+        mid=mid,
+        iv=iv,
+        delta=q.get("delta"),
+        gamma=q.get("gamma"),
+        theta=q.get("theta"),
+        vega=q.get("vega"),
+        dte=dte,
     )
 
 
@@ -412,6 +521,7 @@ def _filter_quotes_for_leg(
 ) -> List[Dict[str, Any]]:
     dte_min, dte_max = _get_leg_dte_bounds(strategy, leg, leg_index)
     max_rel_spread = strategy.constraints.max_rel_spread
+    min_quote_size = strategy.constraints.min_quote_size
 
     return filter_quotes_for_constraints(
         quotes=quotes,
@@ -419,16 +529,20 @@ def _filter_quotes_for_leg(
         dte_min=dte_min,
         dte_max=dte_max,
         max_rel_spread=max_rel_spread,
+        min_quote_size=min_quote_size,
     )
 
 
 def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[ResolvedStrategy]:
-    quotes = fetch_latest_option_factors(engine, strategy.underlying_id)
+    factor_rows = fetch_latest_option_factors(engine, strategy.underlying_id)
+    quote_rows = fetch_latest_option_quotes(engine, strategy.underlying_id)
+    quotes = merge_factor_and_quote_rows(factor_rows, quote_rows)
+    print(quotes[:3])
+    spot = fetch_latest_spot(engine, strategy.underlying_id)
+
     print(f"[resolver] total quotes = {len(quotes)}")
     if not quotes:
         return None
-
-    spot = fetch_latest_spot(engine, strategy.underlying_id)
 
     print(f"[resolver] strategy_type = {strategy.strategy_type}")
 
@@ -449,6 +563,18 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
 
     first_filtered = _filter_quotes_for_leg(quotes, strategy, first_leg_spec, 0)
     print(f"[resolver] first leg filtered quotes = {len(first_filtered)}")
+    print("[resolver] first leg sample spreads:", [
+        (
+            q.get("contract_id"),
+            q.get("bid_price1"),
+            q.get("ask_price1"),
+            round((q.get("ask_price1") - q.get("bid_price1")) / q.get("mid_price"), 4)
+            if q.get("bid_price1") is not None and q.get("ask_price1") is not None and q.get("mid_price") not in (
+            None, 0)
+            else None
+        )
+        for q in first_filtered[:5]
+    ])
 
     if first_filtered:
         expiries = sorted({q["expiry_date"].isoformat() for q in first_filtered if q.get("expiry_date") is not None})
@@ -540,6 +666,18 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
                 second_expiry = calendar_second_expiry
 
                 print(f"[resolver] second leg filtered quotes = {len(second_filtered)}")
+                print("[resolver] second leg sample spreads:", [
+                    (
+                        q.get("contract_id"),
+                        q.get("bid_price1"),
+                        q.get("ask_price1"),
+                        round((q.get("ask_price1") - q.get("bid_price1")) / q.get("mid_price"), 4)
+                        if q.get("bid_price1") is not None and q.get("ask_price1") is not None and q.get(
+                            "mid_price") not in (None, 0)
+                        else None
+                    )
+                    for q in second_filtered[:5]
+                ])
                 if second_filtered:
                     expiries = sorted({
                         q["expiry_date"].isoformat()
