@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 
 from app.models.schemas import ResolvedStrategy
-
+from app.strategy.greeks_monitor import compute_strategy_net_greeks
 
 def _avg_rel_spread(strategy: ResolvedStrategy) -> float:
     spreads = []
@@ -221,14 +221,59 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
     ranked: List[ResolvedStrategy] = []
 
     for strategy in strategies:
+        # ===== 1. base score =====
         if strategy.strategy_type in ("call_calendar", "put_calendar"):
-            total_score, breakdown = _score_calendar_strategy(strategy)
+            base_score, breakdown = _score_calendar_strategy(strategy)
         else:
-            total_score, breakdown = _score_generic_strategy(strategy)
+            base_score, breakdown = _score_generic_strategy(strategy)
 
-        strategy.score = round(total_score, 4)
+        # ===== 2. Greeks adjustment =====
+        greeks = compute_strategy_net_greeks(strategy)
+
+        adj = 1.0
+
+        net_delta = greeks.get("net_delta")
+        if net_delta is not None:
+            if abs(net_delta) > 0.15:
+                adj *= 0.7
+            elif abs(net_delta) > 0.08:
+                adj *= 0.85
+
+        if strategy.strategy_type in ("call_calendar", "put_calendar"):
+            net_vega = greeks.get("net_vega")
+            net_gamma = greeks.get("net_gamma")
+
+            if net_vega is not None and net_vega <= 0:
+                adj *= 0.7
+
+            if net_gamma is not None and net_gamma < -1.0:
+                adj *= 0.85
+
+        # ===== 3. PRIOR（新增核心）=====
+        prior = 1.0
+        if strategy.metadata:
+            prior = strategy.metadata.get("prior_weight", 1.0)
+
+        # ⚠️ 平滑处理（关键）
+        prior_adj = 0.7 + 0.3 * prior
+        # → prior=1 → 1.0
+        # → prior=0.5 → 0.85
+        # → prior=0 → 0.7（不会归零）
+
+        # ===== 4. final score =====
+        final_score = base_score * adj * prior_adj
+
+        # ===== 5. 记录 =====
+        breakdown["greeks_adj"] = round(adj, 4)
+        breakdown["prior"] = round(prior, 4)
+        breakdown["prior_adj"] = round(prior_adj, 4)
+
+        strategy.score = round(final_score, 4)
         strategy.score_breakdown = breakdown
+
         ranked.append(strategy)
 
     ranked.sort(key=lambda x: x.score or 0.0, reverse=True)
+    print(
+        f"[rank] {strategy.strategy_type} base={base_score:.3f} adj={adj:.3f} prior={prior:.2f} final={final_score:.3f}")
     return ranked

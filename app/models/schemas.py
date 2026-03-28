@@ -23,6 +23,12 @@ StrategyType = Literal[
     "put_calendar",
     "diagonal_call",
     "diagonal_put",
+
+    # 新增
+    "bull_call_spread",
+    "bear_put_spread",
+    "iron_condor",
+    "iron_fly",
 ]
 OptionType = Literal["CALL", "PUT"]
 ActionType = Literal["BUY", "SELL"]

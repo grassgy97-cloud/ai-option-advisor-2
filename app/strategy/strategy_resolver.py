@@ -533,6 +533,10 @@ def _filter_quotes_for_leg(
 
 
 def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[ResolvedStrategy]:
+    # ===== 多腿结构优先处理 =====
+    if strategy.strategy_type in ("iron_condor", "iron_fly"):
+        return _resolve_iron_structure(engine, strategy)
+
     factor_rows = fetch_latest_option_factors(engine, strategy.underlying_id)
     quote_rows = fetch_latest_option_quotes(engine, strategy.underlying_id)
     quotes = merge_factor_and_quote_rows(factor_rows, quote_rows)
@@ -652,7 +656,12 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
         print(f"[resolver] second leg option_type = {second_leg_spec.option_type}")
         print(f"[resolver] second leg dte range = {second_dte_min} ~ {second_dte_max}")
 
-        if strategy.strategy_type in ("bear_call_spread", "bull_put_spread"):
+        if strategy.strategy_type in (
+                "bear_call_spread",
+                "bull_put_spread",
+                "bull_call_spread",
+                "bear_put_spread",
+        ):
             second_leg_quote = choose_vertical_buy_leg(
                 quotes=first_filtered,
                 sell_leg=first_leg_quote,
@@ -759,4 +768,89 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
         net_debit=net_debit,
         rationale=strategy.rationale,
         metadata={"source": "strategy_resolver", "strategy_metadata": strategy.metadata},
+    )
+
+def _resolve_iron_structure(engine: Engine, strategy: StrategySpec) -> Optional[ResolvedStrategy]:
+    factor_rows = fetch_latest_option_factors(engine, strategy.underlying_id)
+    quote_rows = fetch_latest_option_quotes(engine, strategy.underlying_id)
+    quotes = merge_factor_and_quote_rows(factor_rows, quote_rows)
+    spot = fetch_latest_spot(engine, strategy.underlying_id)
+
+    if not quotes:
+        return None
+
+    # ===== filter =====
+    filtered = filter_quotes_for_constraints(
+        quotes,
+        dte_min=strategy.constraints.dte_min,
+        dte_max=strategy.constraints.dte_max,
+        max_rel_spread=strategy.constraints.max_rel_spread,
+        min_quote_size=strategy.constraints.min_quote_size,
+    )
+
+    if not filtered:
+        return None
+
+    grouped = group_by_expiry(filtered)
+    expiry = choose_expiry(grouped, "nearest")
+
+    if expiry is None:
+        return None
+
+    same_expiry = [q for q in filtered if q["expiry_date"] == expiry]
+
+    calls = [q for q in same_expiry if q["option_type"] == "CALL"]
+    puts = [q for q in same_expiry if q["option_type"] == "PUT"]
+
+    if not calls or not puts:
+        return None
+
+    # ===== SELL legs =====
+    if strategy.strategy_type == "iron_condor":
+        call_sell = choose_by_delta_target(calls, 0.3)
+        put_sell = choose_by_delta_target(puts, 0.3)
+    else:  # iron_fly
+        call_sell = choose_by_delta_target(calls, 0.5)
+        put_sell = choose_by_delta_target(puts, 0.5)
+
+    if not call_sell or not put_sell:
+        return None
+
+    # ===== BUY wings =====
+    call_buy = None
+    put_buy = None
+
+    # CALL wing（更远OTM）
+    call_candidates = [q for q in calls if q["strike"] > call_sell["strike"]]
+    if call_candidates:
+        call_buy = choose_by_delta_target(call_candidates, 0.15)
+
+    # PUT wing
+    put_candidates = [q for q in puts if q["strike"] < put_sell["strike"]]
+    if put_candidates:
+        put_buy = choose_by_delta_target(put_candidates, 0.15)
+
+    if not call_buy or not put_buy:
+        return None
+
+    # ===== build =====
+    legs = [
+        build_resolved_leg(call_sell, "SELL"),
+        build_resolved_leg(call_buy, "BUY"),
+        build_resolved_leg(put_sell, "SELL"),
+        build_resolved_leg(put_buy, "BUY"),
+    ]
+
+    net_premium, net_credit, net_debit = calc_net_premium(legs)
+
+    return ResolvedStrategy(
+        strategy_type=strategy.strategy_type,
+        underlying_id=strategy.underlying_id,
+        spot_price=spot,
+        legs=legs,
+        net_premium=net_premium,
+        net_credit=net_credit,
+        net_debit=net_debit,
+        rationale=strategy.rationale,
+        metadata={"source": "strategy_resolver"},
     )

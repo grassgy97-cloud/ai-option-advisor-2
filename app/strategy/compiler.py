@@ -4,24 +4,20 @@ from typing import List
 
 from app.models.schemas import (
     IntentSpec,
-    LegConstraint,
-    StrategyConstraint,
-    StrategyLegSpec,
     StrategySpec,
+    StrategyLegSpec,
+    StrategyConstraint,
 )
 
 
-def compile_intent_to_strategies(intent: IntentSpec) -> List[StrategySpec]:
-    """
-    纯规则版 compiler：
-    把用户观点映射成候选 StrategySpec。
+# ==============================
+# strategy spec factory
+# ==============================
 
-    设计原则：
-    1. vertical spread：继续用 delta_target 选腿
-    2. calendar：不再依赖 delta_target，而是交给 resolver 按“近ATM + 同strike”处理
-    """
+def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec | None:
+    underlying_id = intent.underlying_id
 
-    base_constraints = StrategyConstraint(
+    common_constraints = StrategyConstraint(
         defined_risk_only=intent.defined_risk_only,
         dte_min=intent.dte_min,
         dte_max=intent.dte_max,
@@ -29,272 +25,209 @@ def compile_intent_to_strategies(intent: IntentSpec) -> List[StrategySpec]:
         min_quote_size=intent.min_quote_size,
     )
 
-    candidates: List[StrategySpec] = []
+    # ===== calendar =====
+    if strategy_type == "call_calendar":
+        return StrategySpec(
+            strategy_type="call_calendar",
+            underlying_id=underlying_id,
+            legs=[
+                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest"),
+                StrategyLegSpec(action="BUY", option_type="CALL", expiry_rule="next_expiry"),
+            ],
+            constraints=common_constraints,
+            rationale="sell near call, buy far call",
+            metadata={},
+        )
 
-    allowed = set(intent.allowed_strategies or [])
-    banned = set(intent.banned_strategies or [])
+    if strategy_type == "put_calendar":
+        return StrategySpec(
+            strategy_type="put_calendar",
+            underlying_id=underlying_id,
+            legs=[
+                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="nearest"),
+                StrategyLegSpec(action="BUY", option_type="PUT", expiry_rule="next_expiry"),
+            ],
+            constraints=common_constraints,
+            rationale="sell near put, buy far put",
+            metadata={},
+        )
 
-    def _is_allowed(strategy_type: str) -> bool:
-        if strategy_type in banned:
-            return False
-        if allowed and strategy_type not in allowed:
-            return False
-        return True
+    # ===== diagonal =====
+    if strategy_type == "diagonal_call":
+        return StrategySpec(
+            strategy_type="diagonal_call",
+            underlying_id=underlying_id,
+            legs=[
+                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest", delta_target=0.3),
+                StrategyLegSpec(action="BUY", option_type="CALL", expiry_rule="next_expiry", delta_target=0.5),
+            ],
+            constraints=common_constraints,
+            rationale="call diagonal",
+            metadata={},
+        )
 
-    def _build_calendar_metadata(option_type: str) -> dict:
-        near_dte_min = intent.dte_min
-        near_dte_max = intent.dte_max
+    if strategy_type == "diagonal_put":
+        return StrategySpec(
+            strategy_type="diagonal_put",
+            underlying_id=underlying_id,
+            legs=[
+                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="nearest", delta_target=0.3),
+                StrategyLegSpec(action="BUY", option_type="PUT", expiry_rule="next_expiry", delta_target=0.5),
+            ],
+            constraints=common_constraints,
+            rationale="put diagonal",
+            metadata={},
+        )
 
-        # 远月腿默认比近月更晚，并给足上限
-        far_dte_min = max(intent.dte_max + 1, intent.dte_min + 1)
-        far_dte_max = max(far_dte_min + 30, 120)
+    # ===== vertical =====
+    if strategy_type == "bull_call_spread":
+        return StrategySpec(
+            strategy_type="bull_call_spread",
+            underlying_id=underlying_id,
+            legs=[
+                StrategyLegSpec(action="BUY", option_type="CALL", expiry_rule="nearest", delta_target=0.5),
+                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="same_expiry", delta_target=0.3),
+            ],
+            constraints=common_constraints,
+            rationale="bull call spread",
+            metadata={},
+        )
 
-        return {
-            "source": "rule_based_compiler",
-            "calendar_option_type": option_type,
-            "near_dte_min": near_dte_min,
-            "near_dte_max": near_dte_max,
-            "far_dte_min": far_dte_min,
-            "far_dte_max": far_dte_max,
-            # 供 resolver 使用的选腿提示
-            "selection_mode": "atm_like_same_strike_calendar",
-            "atm_moneyness_low": 0.90,
-            "atm_moneyness_high": 1.10,
-        }
+    if strategy_type == "bear_call_spread":
+        return StrategySpec(
+            strategy_type="bear_call_spread",
+            underlying_id=underlying_id,
+            legs=[
+                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest", delta_target=0.3),
+                StrategyLegSpec(action="BUY", option_type="CALL", expiry_rule="same_expiry", delta_target=0.15),
+            ],
+            constraints=common_constraints,
+            rationale="bear call spread",
+            metadata={},
+        )
 
-    # 1) call iv 偏贵
+    if strategy_type == "bull_put_spread":
+        return StrategySpec(
+            strategy_type="bull_put_spread",
+            underlying_id=underlying_id,
+            legs=[
+                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="nearest", delta_target=0.3),
+                StrategyLegSpec(action="BUY", option_type="PUT", expiry_rule="same_expiry", delta_target=0.15),
+            ],
+            constraints=common_constraints,
+            rationale="bull put spread",
+            metadata={},
+        )
+
+    if strategy_type == "bear_put_spread":
+        return StrategySpec(
+            strategy_type="bear_put_spread",
+            underlying_id=underlying_id,
+            legs=[
+                StrategyLegSpec(action="BUY", option_type="PUT", expiry_rule="nearest", delta_target=0.5),
+                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="same_expiry", delta_target=0.3),
+            ],
+            constraints=common_constraints,
+            rationale="bear put spread",
+            metadata={},
+        )
+
+    # ===== condor =====
+    if strategy_type == "iron_condor":
+        return StrategySpec(
+            strategy_type="iron_condor",
+            underlying_id=underlying_id,
+            legs=[
+                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest", delta_target=0.3),
+                StrategyLegSpec(action="BUY", option_type="CALL", expiry_rule="same_expiry", delta_target=0.15),
+                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="nearest", delta_target=0.3),
+                StrategyLegSpec(action="BUY", option_type="PUT", expiry_rule="same_expiry", delta_target=0.15),
+            ],
+            constraints=common_constraints,
+            rationale="iron condor",
+            metadata={},
+        )
+
+    if strategy_type == "iron_fly":
+        return StrategySpec(
+            strategy_type="iron_fly",
+            underlying_id=underlying_id,
+            legs=[
+                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest", delta_target=0.5),
+                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="nearest", delta_target=0.5),
+                StrategyLegSpec(action="BUY", option_type="CALL", expiry_rule="same_expiry", delta_target=0.2),
+                StrategyLegSpec(action="BUY", option_type="PUT", expiry_rule="same_expiry", delta_target=0.2),
+            ],
+            constraints=common_constraints,
+            rationale="iron fly",
+            metadata={},
+        )
+
+    return None
+
+
+# ==============================
+# main compiler
+# ==============================
+
+def compile_intent_to_strategies(intent: IntentSpec) -> List[StrategySpec]:
+    candidates: List[tuple[str, float]] = []
+
+    # ===== vol signals =====
     if intent.vol_view == "call_iv_rich":
-        if intent.defined_risk_only and _is_allowed("bear_call_spread"):
-            candidates.append(
-                StrategySpec(
-                    strategy_type="bear_call_spread",
-                    underlying_id=intent.underlying_id,
-                    legs=[
-                        StrategyLegSpec(
-                            action="SELL",
-                            option_type="CALL",
-                            expiry_rule="nearest",
-                            delta_target=0.30,
-                        ),
-                        StrategyLegSpec(
-                            action="BUY",
-                            option_type="CALL",
-                            expiry_rule="same_expiry",
-                            delta_target=0.15,
-                        ),
-                    ],
-                    constraints=base_constraints,
-                    rationale="认购隐波偏贵，优先考虑定义损失的 bear call spread。",
-                    metadata={"source": "rule_based_compiler"},
-                )
-            )
+        candidates += [
+            ("call_calendar", 1.0),
+            ("diagonal_call", 0.9),
+            ("bear_call_spread", 0.75),
+            ("bull_call_spread", 0.7),
+        ]
 
-        if intent.prefer_multi_leg and _is_allowed("call_calendar"):
-            cal_meta = _build_calendar_metadata("CALL")
-            candidates.append(
-                StrategySpec(
-                    strategy_type="call_calendar",
-                    underlying_id=intent.underlying_id,
-                    legs=[
-                        StrategyLegSpec(
-                            action="SELL",
-                            option_type="CALL",
-                            expiry_rule="nearest",
-                            delta_target=None,  # calendar 不靠 delta 选腿
-                            leg_constraints=LegConstraint(
-                                dte_min=cal_meta["near_dte_min"],
-                                dte_max=cal_meta["near_dte_max"],
-                                max_rel_spread=intent.max_rel_spread,
-                                min_quote_size=intent.min_quote_size,
-                            ),
-                        ),
-                        StrategyLegSpec(
-                            action="BUY",
-                            option_type="CALL",
-                            expiry_rule="next_expiry",
-                            delta_target=None,  # calendar 不靠 delta 选腿
-                            leg_constraints=LegConstraint(
-                                dte_min=cal_meta["far_dte_min"],
-                                dte_max=cal_meta["far_dte_max"],
-                                max_rel_spread=intent.max_rel_spread,
-                                min_quote_size=intent.min_quote_size,
-                            ),
-                        ),
-                    ],
-                    constraints=base_constraints,
-                    rationale="近月认购相对偏贵，可考虑卖近买远、同strike的 call calendar。",
-                    metadata=cal_meta,
-                )
-            )
+    elif intent.vol_view == "put_iv_rich":
+        candidates += [
+            ("put_calendar", 1.0),
+            ("diagonal_put", 0.9),
+            ("bear_put_spread", 0.75),
+            ("bull_put_spread", 0.7),
+        ]
 
-    # 2) put iv 偏贵
-    if intent.vol_view == "put_iv_rich":
-        if intent.defined_risk_only and _is_allowed("bull_put_spread"):
-            candidates.append(
-                StrategySpec(
-                    strategy_type="bull_put_spread",
-                    underlying_id=intent.underlying_id,
-                    legs=[
-                        StrategyLegSpec(
-                            action="SELL",
-                            option_type="PUT",
-                            expiry_rule="nearest",
-                            delta_target=0.30,
-                        ),
-                        StrategyLegSpec(
-                            action="BUY",
-                            option_type="PUT",
-                            expiry_rule="same_expiry",
-                            delta_target=0.15,
-                        ),
-                    ],
-                    constraints=base_constraints,
-                    rationale="认沽隐波偏贵，优先考虑定义损失的 bull put spread。",
-                    metadata={"source": "rule_based_compiler"},
-                )
-            )
+    # ===== direction =====
+    if intent.market_view == "bullish":
+        candidates += [
+            ("bull_call_spread", 0.9),
+            ("bull_put_spread", 0.85),
+        ]
 
-        if intent.prefer_multi_leg and _is_allowed("put_calendar"):
-            cal_meta = _build_calendar_metadata("PUT")
-            candidates.append(
-                StrategySpec(
-                    strategy_type="put_calendar",
-                    underlying_id=intent.underlying_id,
-                    legs=[
-                        StrategyLegSpec(
-                            action="SELL",
-                            option_type="PUT",
-                            expiry_rule="nearest",
-                            delta_target=None,
-                            leg_constraints=LegConstraint(
-                                dte_min=cal_meta["near_dte_min"],
-                                dte_max=cal_meta["near_dte_max"],
-                                max_rel_spread=intent.max_rel_spread,
-                                min_quote_size=intent.min_quote_size,
-                            ),
-                        ),
-                        StrategyLegSpec(
-                            action="BUY",
-                            option_type="PUT",
-                            expiry_rule="next_expiry",
-                            delta_target=None,
-                            leg_constraints=LegConstraint(
-                                dte_min=cal_meta["far_dte_min"],
-                                dte_max=cal_meta["far_dte_max"],
-                                max_rel_spread=intent.max_rel_spread,
-                                min_quote_size=intent.min_quote_size,
-                            ),
-                        ),
-                    ],
-                    constraints=base_constraints,
-                    rationale="近月认沽相对偏贵，可考虑卖近买远、同strike的 put calendar。",
-                    metadata=cal_meta,
-                )
-            )
+    elif intent.market_view == "bearish":
+        candidates += [
+            ("bear_call_spread", 0.9),
+            ("bear_put_spread", 0.85),
+        ]
 
-    # 3) term front high：近月波动率高于远月
-    if intent.vol_view == "term_front_high":
-        if _is_allowed("call_calendar"):
-            cal_meta = _build_calendar_metadata("CALL")
-            candidates.append(
-                StrategySpec(
-                    strategy_type="call_calendar",
-                    underlying_id=intent.underlying_id,
-                    legs=[
-                        StrategyLegSpec(
-                            action="SELL",
-                            option_type="CALL",
-                            expiry_rule="nearest",
-                            delta_target=None,
-                            leg_constraints=LegConstraint(
-                                dte_min=cal_meta["near_dte_min"],
-                                dte_max=cal_meta["near_dte_max"],
-                                max_rel_spread=intent.max_rel_spread,
-                                min_quote_size=intent.min_quote_size,
-                            ),
-                        ),
-                        StrategyLegSpec(
-                            action="BUY",
-                            option_type="CALL",
-                            expiry_rule="next_expiry",
-                            delta_target=None,
-                            leg_constraints=LegConstraint(
-                                dte_min=cal_meta["far_dte_min"],
-                                dte_max=cal_meta["far_dte_max"],
-                                max_rel_spread=intent.max_rel_spread,
-                                min_quote_size=intent.min_quote_size,
-                            ),
-                        ),
-                    ],
-                    constraints=base_constraints,
-                    rationale="近月波动率高于远月，优先考虑卖近买远、同strike的 call calendar。",
-                    metadata=cal_meta,
-                )
-            )
+    else:  # neutral
+        candidates += [
+            ("iron_condor", 0.85),
+            ("iron_fly", 0.8),
+        ]
 
-        if _is_allowed("put_calendar"):
-            cal_meta = _build_calendar_metadata("PUT")
-            candidates.append(
-                StrategySpec(
-                    strategy_type="put_calendar",
-                    underlying_id=intent.underlying_id,
-                    legs=[
-                        StrategyLegSpec(
-                            action="SELL",
-                            option_type="PUT",
-                            expiry_rule="nearest",
-                            delta_target=None,
-                            leg_constraints=LegConstraint(
-                                dte_min=cal_meta["near_dte_min"],
-                                dte_max=cal_meta["near_dte_max"],
-                                max_rel_spread=intent.max_rel_spread,
-                                min_quote_size=intent.min_quote_size,
-                            ),
-                        ),
-                        StrategyLegSpec(
-                            action="BUY",
-                            option_type="PUT",
-                            expiry_rule="next_expiry",
-                            delta_target=None,
-                            leg_constraints=LegConstraint(
-                                dte_min=cal_meta["far_dte_min"],
-                                dte_max=cal_meta["far_dte_max"],
-                                max_rel_spread=intent.max_rel_spread,
-                                min_quote_size=intent.min_quote_size,
-                            ),
-                        ),
-                    ],
-                    constraints=base_constraints,
-                    rationale="近月波动率高于远月，也可考虑卖近买远、同strike的 put calendar。",
-                    metadata=cal_meta,
-                )
-            )
+    # ===== multi-leg preference =====
+    if intent.prefer_multi_leg:
+        candidates += [
+            ("call_calendar", 0.9),
+            ("put_calendar", 0.9),
+        ]
 
-    # 4) 默认兜底
-    if not candidates:
-        if intent.market_view == "neutral" and _is_allowed("bear_call_spread"):
-            candidates.append(
-                StrategySpec(
-                    strategy_type="bear_call_spread",
-                    underlying_id=intent.underlying_id,
-                    legs=[
-                        StrategyLegSpec(
-                            action="SELL",
-                            option_type="CALL",
-                            expiry_rule="nearest",
-                            delta_target=0.30,
-                        ),
-                        StrategyLegSpec(
-                            action="BUY",
-                            option_type="CALL",
-                            expiry_rule="same_expiry",
-                            delta_target=0.15,
-                        ),
-                    ],
-                    constraints=base_constraints,
-                    rationale="默认中性低风险兜底策略。",
-                    metadata={"source": "rule_based_compiler"},
-                )
-            )
+    # ===== 去重（保留最高权重）=====
+    best_map = {}
+    for s, w in candidates:
+        if s not in best_map or w > best_map[s]:
+            best_map[s] = w
 
-    return candidates
+    # ===== build =====
+    specs: List[StrategySpec] = []
+    for strategy_type, weight in best_map.items():
+        spec = build_strategy_spec(strategy_type, intent)
+        if spec:
+            spec.metadata["prior_weight"] = weight
+            specs.append(spec)
+
+    return specs
