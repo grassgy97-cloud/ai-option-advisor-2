@@ -238,7 +238,7 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
 
     # greeks_report 挂到 metadata
     for s in ranked:
-        s.metadata["greeks_report"] = build_strategy_greeks_report(s)
+        s.metadata["greeks_report"] = build_strategy_greeks_report(s, engine=engine)
 
     backtest_result = build_disabled_backtest(ranked)
 

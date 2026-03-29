@@ -1,8 +1,20 @@
+"""
+greeks_monitor.py — 策略 Greeks 报告生成
+
+改动说明（相比原版）：
+  - build_strategy_greeks_report() 新增 iv_percentile 字段
+  - 需要传入 engine 参数（可选，不传则跳过 IV percentile）
+  - commentary 新增 IV percentile 相关描述
+"""
+
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy.engine import Engine
 
 from app.models.schemas import ResolvedStrategy
+from app.strategy.iv_percentile import build_iv_percentile_report
 
 
 def _leg_sign(action: str) -> int:
@@ -15,10 +27,7 @@ def compute_strategy_net_greeks(strategy: ResolvedStrategy) -> Dict[str, float |
     net_theta = 0.0
     net_vega = 0.0
 
-    has_delta = False
-    has_gamma = False
-    has_theta = False
-    has_vega = False
+    has_delta = has_gamma = has_theta = has_vega = False
 
     for leg in strategy.legs:
         sign = _leg_sign(leg.action)
@@ -27,15 +36,12 @@ def compute_strategy_net_greeks(strategy: ResolvedStrategy) -> Dict[str, float |
         if leg.delta is not None:
             net_delta += sign * qty * leg.delta
             has_delta = True
-
         if leg.gamma is not None:
             net_gamma += sign * qty * leg.gamma
             has_gamma = True
-
         if leg.theta is not None:
             net_theta += sign * qty * leg.theta
             has_theta = True
-
         if leg.vega is not None:
             net_vega += sign * qty * leg.vega
             has_vega = True
@@ -50,11 +56,7 @@ def compute_strategy_net_greeks(strategy: ResolvedStrategy) -> Dict[str, float |
 
 def build_calendar_term_structure(strategy: ResolvedStrategy) -> Dict[str, float | None]:
     if len(strategy.legs) < 2:
-        return {
-            "near_iv": None,
-            "far_iv": None,
-            "iv_diff": None,
-        }
+        return {"near_iv": None, "far_iv": None, "iv_diff": None}
 
     near_leg = strategy.legs[0]
     far_leg = strategy.legs[1]
@@ -88,38 +90,24 @@ def build_risk_flags(strategy: ResolvedStrategy) -> List[str]:
     if net_gamma is not None and net_gamma < -0.5:
         flags.append("short_gamma")
 
-    if strategy.strategy_type in ("call_calendar", "put_calendar"):
+    if strategy.strategy_type in ("call_calendar", "put_calendar",
+                                   "diagonal_call", "diagonal_put"):
         if net_vega is not None and net_vega <= 0:
             flags.append("vega_not_positive_for_calendar")
-
         if net_theta is not None and net_theta < -0.002:
             flags.append("theta_too_negative")
-
         if iv_diff is not None and iv_diff > -0.002:
             flags.append("term_signal_weak")
 
     return flags
 
 
-def build_strategy_greeks_report(strategy: ResolvedStrategy) -> Dict[str, Any]:
-    report: Dict[str, Any] = {
-        "strategy_type": strategy.strategy_type,
-        "underlying_id": strategy.underlying_id,
-        "spot_price": strategy.spot_price,
-        "net_greeks": compute_strategy_net_greeks(strategy),
-        "risk_flags": build_risk_flags(strategy),
-        "commentary": build_greeks_commentary(strategy),
-    }
-
-    if strategy.strategy_type in ("call_calendar", "put_calendar"):
-        report["term_structure"] = build_calendar_term_structure(strategy)
-
-    return report
-
-def build_greeks_commentary(strategy: ResolvedStrategy) -> str:
+def build_greeks_commentary(
+    strategy: ResolvedStrategy,
+    iv_pct_report: Optional[Dict[str, Any]] = None,
+) -> str:
     greeks = compute_strategy_net_greeks(strategy)
     ts = build_calendar_term_structure(strategy)
-
     parts = []
 
     net_delta = greeks.get("net_delta")
@@ -137,16 +125,10 @@ def build_greeks_commentary(strategy: ResolvedStrategy) -> str:
             parts.append("组合略偏空delta")
 
     if net_vega is not None:
-        if net_vega > 0:
-            parts.append("组合为净多vega")
-        elif net_vega < 0:
-            parts.append("组合为净空vega")
+        parts.append("组合为净多vega" if net_vega > 0 else "组合为净空vega")
 
     if net_theta is not None:
-        if net_theta > 0:
-            parts.append("组合theta为正")
-        elif net_theta < 0:
-            parts.append("组合theta为负")
+        parts.append("组合theta为正" if net_theta > 0 else "组合theta为负")
 
     if net_gamma is not None:
         if net_gamma < -0.5:
@@ -164,4 +146,52 @@ def build_greeks_commentary(strategy: ResolvedStrategy) -> str:
         else:
             parts.append("近远月隐波结构信号偏弱")
 
+    # ── IV percentile 描述 ──
+    if iv_pct_report:
+        label = iv_pct_report.get("label", "")
+        pct = iv_pct_report.get("composite_percentile")
+        if pct is not None:
+            parts.append(f"当前ATM IV处于{label}水平（{pct:.0%}分位）")
+
     return "，".join(parts) + "。"
+
+
+def build_strategy_greeks_report(
+    strategy: ResolvedStrategy,
+    engine: Optional[Engine] = None,
+) -> Dict[str, Any]:
+    """
+    生成策略 Greeks 报告。
+
+    engine 参数可选：
+      - 传入 engine → 附带 IV percentile 报告
+      - 不传 → 跳过 IV percentile（向后兼容）
+    """
+    # IV percentile（需要 engine）
+    iv_pct_report = None
+    if engine is not None:
+        try:
+            iv_pct_report = build_iv_percentile_report(
+                engine=engine,
+                underlying_id=strategy.underlying_id,
+            )
+        except Exception as e:
+            print(f"[greeks_monitor] iv_percentile failed: {e}")
+
+    report: Dict[str, Any] = {
+        "strategy_type": strategy.strategy_type,
+        "underlying_id": strategy.underlying_id,
+        "spot_price": strategy.spot_price,
+        "net_greeks": compute_strategy_net_greeks(strategy),
+        "risk_flags": build_risk_flags(strategy),
+        "commentary": build_greeks_commentary(strategy, iv_pct_report),
+    }
+
+    if strategy.strategy_type in ("call_calendar", "put_calendar",
+                                   "diagonal_call", "diagonal_put"):
+        report["term_structure"] = build_calendar_term_structure(strategy)
+
+    if iv_pct_report is not None:
+        report["iv_percentile"] = iv_pct_report
+
+    return report
