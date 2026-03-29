@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from sqlalchemy.engine import Engine
-
+from app.ai.llm_parser import parse_with_llm
 from app.models.schemas import (
     AdvisorRunResponse,
     IntentSpec,
@@ -14,8 +14,82 @@ from app.strategy.strategy_ranker import rank_strategies
 from app.strategy.strategy_resolver import resolve_strategy
 from app.strategy.greeks_monitor import build_strategy_greeks_report
 
+UNDERLYING_KEYWORDS = {
+    # 上证50
+    "510050": [
+        "上证50", "上证 50", "50etf", "510050",
+        "上证五十", "50 etf",
+    ],
+    # 沪深300（上交所）
+    "510300": [
+        "沪深300", "沪深 300", "300etf", "510300",
+        "沪深三百", "300 etf", "沪深300etf",
+    ],
+    # 中证500
+    "510500": [
+        "中证500", "中证 500", "500etf", "510500",
+        "中证五百", "500 etf",
+    ],
+    # 科创50
+    "588000": [
+        "科创50", "科创 50", "科创板50", "科创板 50",
+        "科创etf", "588000", "科创五十",
+    ],
+    # 深证100
+    "159901": [
+        "深证100", "深证 100", "深100", "100etf",
+        "159901", "深证一百",
+    ],
+    # 创业板
+    "159915": [
+        "创业板", "创业板etf", "159915",
+        "创业板100", "创业etf",
+    ],
+    # 沪深300（深交所）
+    "159919": [
+        "159919", "沪深300深", "300etf深",
+        "华泰柏瑞", "嘉实300",  # 常见简称
+    ],
+}
+
 
 def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec:
+    result = parse_with_llm(text)
+
+    if result is None:
+        # LLM 调用失败，fallback 到规则解析
+        print("[parse_text_to_intent] LLM failed, falling back to rule parser")
+        return _rule_parse_text_to_intent(text, underlying_id)
+
+    underlying_ids = result.get("underlying_ids", [underlying_id])
+    if not underlying_ids:
+        underlying_ids = [underlying_id]
+
+    return IntentSpec(
+        underlying_id=underlying_ids[0],
+        underlying_ids=underlying_ids,
+        market_view=result.get("market_view", "neutral"),
+        vol_view=result.get("vol_view", "none"),
+        risk_preference=result.get("risk_preference", "low"),
+        defined_risk_only=result.get("defined_risk_only", False),
+        prefer_multi_leg=result.get("prefer_multi_leg", False),
+        dte_min=result.get("dte_min", 20),
+        dte_max=result.get("dte_max", 45),
+        max_rel_spread=0.03,
+        min_quote_size=1,
+        banned_strategies=result.get("banned_strategies", []),
+        raw_text=text,
+    )
+
+def _parse_underlying_ids(text: str, default_id: str) -> List[str]:
+    t = text.lower()
+    found = []
+    for uid, keywords in UNDERLYING_KEYWORDS.items():
+        if any(k in t for k in keywords):
+            found.append(uid)
+    return found if found else [default_id]
+
+def _rule_parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec:
     t = (text or "").strip().lower()
 
     market_view = "neutral"
@@ -85,8 +159,10 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
     if any(k in t for k in ["不做对角", "不要diagonal", "no diagonal"]):
         banned_strategies.extend(["diagonal_call", "diagonal_put"])
 
+    underlying_ids = _parse_underlying_ids(t, underlying_id)
     return IntentSpec(
-        underlying_id=underlying_id,
+        underlying_id=underlying_ids[0],  # 兼容旧字段
+        underlying_ids=underlying_ids,  # 新字段
         market_view=market_view,          # type: ignore[arg-type]
         vol_view=vol_view,                # type: ignore[arg-type]
         risk_preference=risk_preference,  # type: ignore[arg-type]
@@ -102,40 +178,34 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
     )
 
 
-def build_disabled_backtest(resolved_candidates: List[ResolvedStrategy]) -> Dict[str, Any]:
-    """
-    当前阶段暂不做期权回测。
-    backtest_result 仅保留接口占位与说明。
-    """
+def build_disabled_backtest(resolved_candidates):
     items = []
     for s in resolved_candidates[:5]:
-        items.append(
-            {
-                "strategy_type": s.strategy_type,
-                "score": s.score,
-                "net_credit": s.net_credit,
-                "net_debit": s.net_debit,
-                "legs": [
-                    {
-                        "contract_id": leg.contract_id,
-                        "action": leg.action,
-                        "option_type": leg.option_type,
-                        "expiry_date": leg.expiry_date,
-                        "strike": leg.strike,
-                        "mid": leg.mid,
-                        "delta": leg.delta,
-                        "gamma": leg.gamma,
-                        "theta": leg.theta,
-                        "vega": leg.vega,
-                        "iv": leg.iv,
-                        "dte": leg.dte,
-                    }
-                    for leg in s.legs
-                ],
-                "greeks_report": build_strategy_greeks_report(s),
-            }
-        )
-
+        items.append({
+            "strategy_type": s.strategy_type,
+            "score": s.score,
+            "net_credit": s.net_credit,
+            "net_debit": s.net_debit,
+            "legs": [
+                {
+                    "contract_id": leg.contract_id,
+                    "action": leg.action,
+                    "option_type": leg.option_type,
+                    "expiry_date": leg.expiry_date,
+                    "strike": leg.strike,
+                    "mid": leg.mid,
+                    "delta": leg.delta,
+                    "gamma": leg.gamma,
+                    "theta": leg.theta,
+                    "vega": leg.vega,
+                    "iv": leg.iv,
+                    "dte": leg.dte,
+                }
+                for leg in s.legs
+            ],
+            # ✅ 直接从 metadata 读，不重复计算
+            "greeks_report": s.metadata.get("greeks_report", {}),
+        })
     return {
         "status": "disabled",
         "summary": "当前阶段暂不做期权回测，重点转向真实选腿、评分统一与 Greeks 监控。",
@@ -144,29 +214,39 @@ def build_disabled_backtest(resolved_candidates: List[ResolvedStrategy]) -> Dict
 
 
 def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> AdvisorRunResponse:
+    # 先 parse（会识别出多标的）
     intent = parse_text_to_intent(text=text, underlying_id=underlying_id)
+    target_ids = intent.effective_underlying_ids
 
-    candidate_specs = compile_intent_to_strategies(intent)
+    all_resolved: List[ResolvedStrategy] = []
 
-    resolved: List[ResolvedStrategy] = []
-    for spec in candidate_specs:
-        try:
-            rs = resolve_strategy(engine, spec)
-            if rs is not None:
-                resolved.append(rs)
-        except Exception as e:
-            print(f"[run_advisor] resolve_strategy failed: {spec.strategy_type}, err={e}")
+    for uid in target_ids:
+        # 为每个标的克隆一份 intent
+        uid_intent = intent.model_copy(update={"underlying_id": uid})
+        candidate_specs = compile_intent_to_strategies(uid_intent)
 
-    ranked = rank_strategies(resolved)
+        for spec in candidate_specs:
+            try:
+                rs = resolve_strategy(engine, spec)
+                if rs is not None:
+                    all_resolved.append(rs)
+            except Exception as e:
+                print(f"[run_advisor] {uid} {spec.strategy_type} failed: {e}")
+
+    # 统一排序
+    ranked = rank_strategies(all_resolved)
+
+    # greeks_report 挂到 metadata
+    for s in ranked:
+        s.metadata["greeks_report"] = build_strategy_greeks_report(s)
+
     backtest_result = build_disabled_backtest(ranked)
 
     resp = AdvisorRunResponse(
         parsed_intent=intent,
-        candidate_strategies=candidate_specs,
+        candidate_strategies=[],   # 多标的下 candidate_strategies 意义不大，留空
         resolved_candidates=ranked,
         backtest_result=backtest_result,
     )
-
-    # 当前阶段收敛输出，不再维护平行的 calendar_recommendations 推荐链
     resp.calendar_recommendations = []
     return resp

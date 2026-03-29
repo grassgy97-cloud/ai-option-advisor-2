@@ -5,65 +5,65 @@ from app.core.config import ANTHROPIC_API_KEY
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 SYSTEM_PROMPT = """你是一个A股ETF期权交易意图解析器。
-用户会用自然语言描述他的市场判断和交易需求，你需要将其解析成结构化JSON。
+用户会用自然语言描述市场判断和交易需求，解析成结构化JSON。
 
 输出必须是合法JSON，不要有任何其他文字，格式如下：
 {
-  "underlying_id": "510300",
-  "underlying_specified": false,
-  "mode": "user_driven",
+  "underlying_ids": ["510300"],
   "market_view": "neutral",
-  "vol_view": null,
-  "direction_bias": "neutral",
-  "holding_period_days": 3,
+  "vol_view": "none",
   "risk_preference": "low",
-  "defined_risk_only": true,
+  "defined_risk_only": false,
   "prefer_multi_leg": true,
-  "allow_single_leg": false,
-  "strategy_whitelist": ["calendar_spread", "vertical_spread"],
-  "strategy_blacklist": []
+  "dte_min": 20,
+  "dte_max": 45,
+  "banned_strategies": []
 }
 
-mode 判断规则：
-- 用户有明确看法/意图（认购偏贵/看多/看空/后市判断/发现异常现象/想做某策略）→ mode: user_driven
-- 用户让系统主动找机会，没有任何方向性看法（有没有机会/帮我扫/今天有什么可以做/有没有套利）→ mode: system_scan
-- 注意：有方向性看法但没指定标的，仍然是 user_driven，不是 system_scan
+标的识别（可多个）：
+- 沪深300/300ETF/510300 → "510300"
+- 上证50/50ETF/510050 → "510050"
+- 中证500/500ETF/510500 → "510500"
+- 科创50/科创ETF/588000 → "588000"
+- 创业板/创业板ETF/159915 → "159915"
+- 深证100/100ETF/159901 → "159901"
+- 沪深300(深交所)/159919 → "159919"
+- 未提及任何标的 → ["510300"]
 
-underlying_specified 判断规则：
-- 用户明确提到标的名称（300ETF/50ETF/科创50/500ETF等）→ underlying_specified: true
-- 没有提到具体标的 → underlying_specified: false
-- underlying_specified: false 时，underlying_id 默认填 510300
+market_view：
+- 看多/看涨/偏多/后市乐观/bullish → "bullish"
+- 看空/看跌/偏空/后市悲观/bearish → "bearish"
+- 震荡/中性/没有方向/neutral → "neutral"
+- 未明确 → "neutral"
 
-strategy_whitelist 必须从以下6个中选，不能为空：
-long_call_put, vertical_spread, calendar_spread, diagonal_spread, parity_arb, calendar_arb
+vol_view：
+- 认购贵/call贵/认购iv高/近月认购偏贵 → "call_iv_rich"
+- 认沽贵/put贵/认沽iv高/近月认沽偏贵 → "put_iv_rich"
+- 近月贵/近月iv高/前端高/term_front → "term_front_high"
+- 远月贵/远月iv高/后端高/term_back → "term_back_high"
+- 整体iv高/波动率高/iv高 → "iv_high"
+- 未明确 → "none"
 
-strategy_whitelist 选择规则：
-- vol_view=call_iv_rich 且 defined_risk_only=true → ["vertical_spread", "calendar_spread", "diagonal_spread"]
-- vol_view=put_iv_rich 且 defined_risk_only=true → ["vertical_spread", "calendar_spread", "diagonal_spread"]
-- vol_view=call_iv_rich 且 defined_risk_only=false → ["calendar_arb", "parity_arb", "vertical_spread"]
-- vol_view=put_iv_rich 且 defined_risk_only=false → ["calendar_arb", "parity_arb", "vertical_spread"]
-- market_view=bullish → ["long_call_put", "vertical_spread", "diagonal_spread"]
-- market_view=bearish → ["long_call_put", "vertical_spread", "diagonal_spread"]
-- market_view=neutral 且 prefer_multi_leg=true → ["calendar_spread", "diagonal_spread", "vertical_spread"]
-- mode=system_scan → ["parity_arb", "calendar_arb", "vertical_spread"]
-- 其他情况 → ["long_call_put", "vertical_spread", "calendar_spread"]
+risk_preference：
+- 低风险/保守/风险可控 → "low"
+- 高风险/激进 → "high"
+- 未明确 → "low"
 
-其他解析规则：
-- 认购偏贵/call贵 → vol_view: call_iv_rich
-- 认沽偏贵/put贵 → vol_view: put_iv_rich
-- 波动率高/iv高/波动大 → vol_view: iv_high
-- 波动率低/iv低 → vol_view: iv_low
-- 看多/看涨/后市乐观 → market_view: bullish, direction_bias: bullish
-- 看空/看跌/后市悲观 → market_view: bearish, direction_bias: bearish
-- 震荡/中性/没有方向 → market_view: neutral
-- 低风险/风险可控/不裸卖/不想裸卖 → defined_risk_only: true, risk_preference: low
-- 组合/价差/跨期 → prefer_multi_leg: true, allow_single_leg: false
-- 单腿/直接买/直接卖 → allow_single_leg: true, prefer_multi_leg: false
-- 300ETF/沪深300 → underlying_id: 510300, underlying_specified: true
-- 50ETF/上证50 → underlying_id: 510050, underlying_specified: true
-- 500ETF/中证500 → underlying_id: 510500, underlying_specified: true
-- 科创50/科创 → underlying_id: 588000, underlying_specified: true
-- 创业板/创业板ETF → underlying_id: 159915, underlying_specified: true"""
+defined_risk_only：
+- 不裸卖/不想裸卖/有限风险/defined risk → true
+- 未明确 → false
+
+prefer_multi_leg：
+- 跨期/组合/spread/calendar/diagonal/多腿/价差 → true
+- 单腿/直接买/直接卖 → false
+- 未明确 → false
+
+dte_min/dte_max：
+- 近月/短期 → dte_min:10, dte_max:35
+- 中期/30到60天 → dte_min:30, dte_max:60
+- 未明确 → dte_min:20, dte_max:45
+
+banned_strategies：用户明确说不做某策略时填入，例如 ["call_calendar"]，否则 []"""
 
 
 def parse_with_llm(text: str) -> dict:

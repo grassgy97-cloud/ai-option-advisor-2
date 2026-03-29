@@ -37,24 +37,27 @@ ExpiryRule = Literal["nearest", "same_expiry", "next_expiry", "farther_expiry"]
 
 
 class IntentSpec(BaseModel):
-    underlying_id: str = Field(..., description="标的ID，例如 510300")
+    underlying_id: str = Field(..., description="主标的ID，例如 510300")
+    underlying_ids: List[str] = Field(default_factory=list, description="多标的列表，为空时用underlying_id")
     market_view: MarketView = "neutral"
     vol_view: VolView = "none"
     risk_preference: RiskPreference = "low"
-
     defined_risk_only: bool = True
     prefer_multi_leg: bool = True
-
     dte_min: int = 20
     dte_max: int = 45
-
     max_rel_spread: float = 0.03
     min_quote_size: int = 1
-
     allowed_strategies: Optional[List[StrategyType]] = None
     banned_strategies: List[str] = Field(default_factory=list)
-
     raw_text: Optional[str] = None
+
+    @property
+    def effective_underlying_ids(self) -> List[str]:
+        """返回实际要跑的标的列表"""
+        if self.underlying_ids:
+            return self.underlying_ids
+        return [self.underlying_id]
 
 
 class StrategyConstraint(BaseModel):
