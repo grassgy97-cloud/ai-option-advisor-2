@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from app.ai.advisor_service_v2 import run_advisor
+from app.strategy.advisor_service_v2 import run_advisor
 from app.core.db import engine
 from app.models.schemas import AdvisorRunRequest
 

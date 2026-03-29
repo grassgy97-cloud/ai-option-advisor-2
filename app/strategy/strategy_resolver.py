@@ -315,28 +315,40 @@ def choose_same_expiry_leg(
 
 def choose_vertical_buy_leg(
     quotes: List[Dict[str, Any]],
-    sell_leg: Dict[str, Any],
+    first_leg: Dict[str, Any],
+    strategy_type: str,
     delta_target: Optional[float],
 ) -> Optional[Dict[str, Any]]:
-    option_type = sell_leg["option_type"]
-    expiry = sell_leg["expiry_date"]
-    sell_strike = sell_leg["strike"]
+    option_type = first_leg["option_type"]
+    expiry = first_leg["expiry_date"]
+    first_strike = first_leg["strike"]
 
-    same_expiry = [q for q in quotes if q["option_type"] == option_type and q["expiry_date"] == expiry]
+    same_expiry = [
+        q for q in quotes
+        if q["option_type"] == option_type and q["expiry_date"] == expiry
+    ]
+    if not same_expiry:
+        return None
 
-    if option_type == "CALL":
-        candidates = [q for q in same_expiry if q["strike"] > sell_strike]
+    if strategy_type == "bear_call_spread":
+        candidates = [q for q in same_expiry if q["strike"] > first_strike]
+    elif strategy_type == "bull_put_spread":
+        candidates = [q for q in same_expiry if q["strike"] < first_strike]
+    elif strategy_type == "bull_call_spread":
+        candidates = [q for q in same_expiry if q["strike"] > first_strike]
+    elif strategy_type == "bear_put_spread":
+        candidates = [q for q in same_expiry if q["strike"] < first_strike]
     else:
-        candidates = [q for q in same_expiry if q["strike"] < sell_strike]
+        return None
 
     if not candidates:
         return None
 
     picked = choose_by_delta_target(candidates, delta_target)
-    if picked:
+    if picked is not None:
         return picked
 
-    return min(candidates, key=lambda q: abs(q["strike"] - sell_strike))
+    return min(candidates, key=lambda q: abs(q["strike"] - first_strike))
 
 
 def choose_atm_like_leg(
@@ -664,7 +676,8 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
         ):
             second_leg_quote = choose_vertical_buy_leg(
                 quotes=first_filtered,
-                sell_leg=first_leg_quote,
+                first_leg=first_leg_quote,
+                strategy_type=strategy.strategy_type,
                 delta_target=second_leg_spec.delta_target,
             )
 
@@ -779,61 +792,51 @@ def _resolve_iron_structure(engine: Engine, strategy: StrategySpec) -> Optional[
     if not quotes:
         return None
 
-    # ===== filter =====
     filtered = filter_quotes_for_constraints(
-        quotes,
+        quotes=quotes,
         dte_min=strategy.constraints.dte_min,
         dte_max=strategy.constraints.dte_max,
         max_rel_spread=strategy.constraints.max_rel_spread,
         min_quote_size=strategy.constraints.min_quote_size,
     )
-
     if not filtered:
         return None
 
     grouped = group_by_expiry(filtered)
     expiry = choose_expiry(grouped, "nearest")
-
     if expiry is None:
         return None
 
     same_expiry = [q for q in filtered if q["expiry_date"] == expiry]
-
     calls = [q for q in same_expiry if q["option_type"] == "CALL"]
     puts = [q for q in same_expiry if q["option_type"] == "PUT"]
 
     if not calls or not puts:
         return None
 
-    # ===== SELL legs =====
     if strategy.strategy_type == "iron_condor":
-        call_sell = choose_by_delta_target(calls, 0.3)
-        put_sell = choose_by_delta_target(puts, 0.3)
+        call_sell = choose_by_delta_target(calls, 0.30)
+        put_sell = choose_by_delta_target(puts, 0.30)
+        call_buy = choose_by_delta_target(
+            [q for q in calls if q["strike"] > call_sell["strike"]], 0.15
+        ) if call_sell else None
+        put_buy = choose_by_delta_target(
+            [q for q in puts if q["strike"] < put_sell["strike"]], 0.15
+        ) if put_sell else None
+
     else:  # iron_fly
-        call_sell = choose_by_delta_target(calls, 0.5)
-        put_sell = choose_by_delta_target(puts, 0.5)
+        call_sell = choose_by_delta_target(calls, 0.50)
+        put_sell = choose_by_delta_target(puts, 0.50)
+        call_buy = choose_by_delta_target(
+            [q for q in calls if q["strike"] > call_sell["strike"]], 0.20
+        ) if call_sell else None
+        put_buy = choose_by_delta_target(
+            [q for q in puts if q["strike"] < put_sell["strike"]], 0.20
+        ) if put_sell else None
 
-    if not call_sell or not put_sell:
+    if not all([call_sell, call_buy, put_sell, put_buy]):
         return None
 
-    # ===== BUY wings =====
-    call_buy = None
-    put_buy = None
-
-    # CALL wing（更远OTM）
-    call_candidates = [q for q in calls if q["strike"] > call_sell["strike"]]
-    if call_candidates:
-        call_buy = choose_by_delta_target(call_candidates, 0.15)
-
-    # PUT wing
-    put_candidates = [q for q in puts if q["strike"] < put_sell["strike"]]
-    if put_candidates:
-        put_buy = choose_by_delta_target(put_candidates, 0.15)
-
-    if not call_buy or not put_buy:
-        return None
-
-    # ===== build =====
     legs = [
         build_resolved_leg(call_sell, "SELL"),
         build_resolved_leg(call_buy, "BUY"),
@@ -852,5 +855,5 @@ def _resolve_iron_structure(engine: Engine, strategy: StrategySpec) -> Optional[
         net_credit=net_credit,
         net_debit=net_debit,
         rationale=strategy.rationale,
-        metadata={"source": "strategy_resolver"},
+        metadata={"source": "strategy_resolver", "strategy_metadata": strategy.metadata},
     )

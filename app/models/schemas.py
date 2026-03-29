@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
+from typing import Literal
 
 
 # ===== 新系统 schema =====
@@ -23,8 +24,6 @@ StrategyType = Literal[
     "put_calendar",
     "diagonal_call",
     "diagonal_put",
-
-    # 新增
     "bull_call_spread",
     "bear_put_spread",
     "iron_condor",
