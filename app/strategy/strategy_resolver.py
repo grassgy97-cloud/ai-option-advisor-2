@@ -549,9 +549,16 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
     if strategy.strategy_type in ("iron_condor", "iron_fly"):
         return _resolve_iron_structure(engine, strategy)
 
+    # 在 resolve_strategy 里，merge 之后加这一行
     factor_rows = fetch_latest_option_factors(engine, strategy.underlying_id)
     quote_rows = fetch_latest_option_quotes(engine, strategy.underlying_id)
     quotes = merge_factor_and_quote_rows(factor_rows, quote_rows)
+
+    # ✅ 加这个 normalize，消灭 C/P 混入
+    _OT_MAP = {"C": "CALL", "P": "PUT"}
+    for q in quotes:
+        q["option_type"] = _OT_MAP.get(q.get("option_type", ""), q.get("option_type", ""))
+
     print(quotes[:3])
     spot = fetch_latest_spot(engine, strategy.underlying_id)
 
@@ -632,13 +639,15 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
             far_expiry=calendar_second_expiry,
             spot=spot,
         )
+
     elif strategy.strategy_type in ("diagonal_call", "diagonal_put"):
-        first_leg_quote = choose_atm_like_leg(
+        first_leg_quote = choose_same_expiry_leg(
             first_filtered,
             option_type=first_leg_spec.option_type,
             expiry=first_expiry,
-            spot=spot,
+            delta_target=first_leg_spec.delta_target,  # 0.30
         )
+
     else:
         first_leg_quote = choose_same_expiry_leg(
             first_filtered,
@@ -739,7 +748,7 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
             if second_expiry is None:
                 return None
 
-            if strategy.strategy_type in ("call_calendar", "put_calendar", "diagonal_call", "diagonal_put"):
+            if strategy.strategy_type in ("call_calendar", "put_calendar"):
                 second_leg_quote = choose_same_strike_leg(
                     second_filtered,
                     option_type=second_leg_spec.option_type,
@@ -747,6 +756,15 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
                     strike=first_leg_quote["strike"],
                     delta_target=second_leg_spec.delta_target,
                 )
+            elif strategy.strategy_type in ("diagonal_call", "diagonal_put"):
+                # diagonal 允许不同 strike，按 delta_target 找远月腿
+                second_leg_quote = choose_same_expiry_leg(
+                    second_filtered,
+                    option_type=second_leg_spec.option_type,
+                    expiry=second_expiry,
+                    delta_target=second_leg_spec.delta_target,  # 0.50
+                )
+
             else:
                 second_leg_quote = choose_same_expiry_leg(
                     second_filtered,
@@ -784,9 +802,16 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
     )
 
 def _resolve_iron_structure(engine: Engine, strategy: StrategySpec) -> Optional[ResolvedStrategy]:
+    # 在 resolve_strategy 里，merge 之后加这一行
     factor_rows = fetch_latest_option_factors(engine, strategy.underlying_id)
     quote_rows = fetch_latest_option_quotes(engine, strategy.underlying_id)
     quotes = merge_factor_and_quote_rows(factor_rows, quote_rows)
+
+    # ✅ 加这个 normalize，消灭 C/P 混入
+    _OT_MAP = {"C": "CALL", "P": "PUT"}
+    for q in quotes:
+        q["option_type"] = _OT_MAP.get(q.get("option_type", ""), q.get("option_type", ""))
+
     spot = fetch_latest_spot(engine, strategy.underlying_id)
 
     if not quotes:
