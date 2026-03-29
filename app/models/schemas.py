@@ -11,6 +11,8 @@ from typing import Literal
 MarketView = Literal["bullish", "bearish", "neutral"]
 VolView = Literal[
     "none",
+    "iv_high",
+    "iv_low",
     "call_iv_rich",
     "put_iv_rich",
     "term_front_high",

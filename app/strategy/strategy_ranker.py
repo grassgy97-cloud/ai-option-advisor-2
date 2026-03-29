@@ -216,16 +216,98 @@ def _score_generic_strategy(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
         "cost_score": round(cost_score, 4),
     }
 
+def _extract_prior_weight(strategy: ResolvedStrategy) -> float:
+    if not strategy.metadata:
+        return 1.0
+
+    # 兼容两种位置：
+    # 1) strategy.metadata["prior_weight"]
+    # 2) strategy.metadata["strategy_metadata"]["prior_weight"]
+    if "prior_weight" in strategy.metadata:
+        try:
+            return float(strategy.metadata.get("prior_weight", 1.0) or 1.0)
+        except Exception:
+            return 1.0
+
+    sm = strategy.metadata.get("strategy_metadata") or {}
+    try:
+        return float(sm.get("prior_weight", 1.0) or 1.0)
+    except Exception:
+        return 1.0
+
+
+def _score_iron_structure(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
+    liquidity_score = _liquidity_score(strategy)
+    cost_score = _cost_score(strategy)
+
+    greeks = compute_strategy_net_greeks(strategy)
+    net_delta = greeks.get("net_delta")
+    net_gamma = greeks.get("net_gamma")
+    net_theta = greeks.get("net_theta")
+
+    # delta 越接近中性越好
+    if net_delta is None:
+        delta_score = 0.4
+    elif abs(net_delta) <= 0.05:
+        delta_score = 1.0
+    elif abs(net_delta) <= 0.10:
+        delta_score = 0.8
+    elif abs(net_delta) <= 0.15:
+        delta_score = 0.6
+    else:
+        delta_score = 0.3
+
+    # theta 对 condor/fly 很重要，正 theta 更好
+    if net_theta is None:
+        theta_score = 0.4
+    elif net_theta > 0:
+        theta_score = 1.0
+    else:
+        theta_score = 0.4
+
+    # gamma 不宜过度 short
+    if net_gamma is None:
+        gamma_score = 0.4
+    elif net_gamma >= -1.0:
+        gamma_score = 1.0
+    elif net_gamma >= -1.5:
+        gamma_score = 0.8
+    elif net_gamma >= -2.0:
+        gamma_score = 0.6
+    else:
+        gamma_score = 0.3
+
+    signal_score = 0.4 * delta_score + 0.3 * theta_score + 0.3 * gamma_score
+
+    total_score = (
+        0.45 * signal_score
+        + 0.25 * liquidity_score
+        + 0.30 * cost_score
+    )
+
+    return total_score, {
+        "signal_score": round(signal_score, 4),
+        "delta_score": round(delta_score, 4),
+        "theta_score": round(theta_score, 4),
+        "gamma_score": round(gamma_score, 4),
+        "liquidity_score": round(liquidity_score, 4),
+        "cost_score": round(cost_score, 4),
+    }
+
 
 def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy]:
     ranked: List[ResolvedStrategy] = []
 
     for strategy in strategies:
+        # ===== 1. base score =====
         if strategy.strategy_type in ("call_calendar", "put_calendar"):
             base_score, breakdown = _score_calendar_strategy(strategy)
+        elif strategy.strategy_type in ("iron_condor", "iron_fly"):
+            base_score, breakdown = _score_iron_structure(strategy)
         else:
             base_score, breakdown = _score_generic_strategy(strategy)
 
+        # ===== 2. Greeks adjustment =====
         greeks = compute_strategy_net_greeks(strategy)
 
         adj = 1.0
@@ -244,11 +326,11 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
             if net_gamma is not None and net_gamma < -1.0:
                 adj *= 0.85
 
-        prior = 1.0
-        if strategy.metadata:
-            prior = strategy.metadata.get("prior_weight", 1.0)
-
+        # ===== 3. prior =====
+        prior = _extract_prior_weight(strategy)
         prior_adj = 0.7 + 0.3 * prior
+
+        # ===== 4. final score =====
         final_score = base_score * adj * prior_adj
 
         breakdown["greeks_adj"] = round(adj, 4)

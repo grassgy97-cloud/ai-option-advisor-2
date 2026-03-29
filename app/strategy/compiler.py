@@ -7,6 +7,7 @@ from app.models.schemas import (
     StrategySpec,
     StrategyLegSpec,
     StrategyConstraint,
+    LegConstraint,
 )
 
 
@@ -27,29 +28,103 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
 
     # ===== calendar =====
     if strategy_type == "call_calendar":
+        near_dte_min = max(10, min(intent.dte_min, 35))
+        near_dte_max = max(35, intent.dte_max)
+
         return StrategySpec(
             strategy_type="call_calendar",
             underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest"),
-                StrategyLegSpec(action="BUY", option_type="CALL", expiry_rule="next_expiry"),
+                StrategyLegSpec(
+                    action="SELL",
+                    option_type="CALL",
+                    expiry_rule="nearest",
+                    strike=None,
+                    delta_target=None,
+                    quantity=1,
+                    leg_constraints=LegConstraint(
+                        dte_min=near_dte_min,
+                        dte_max=near_dte_max,
+                        max_rel_spread=intent.max_rel_spread,
+                        min_quote_size=intent.min_quote_size,
+                    ),
+                ),
+                StrategyLegSpec(
+                    action="BUY",
+                    option_type="CALL",
+                    expiry_rule="next_expiry",
+                    strike=None,
+                    delta_target=None,
+                    quantity=1,
+                    leg_constraints=LegConstraint(
+                        dte_min=36,
+                        dte_max=120,
+                        max_rel_spread=intent.max_rel_spread,
+                        min_quote_size=intent.min_quote_size,
+                    ),
+                ),
             ],
             constraints=common_constraints,
             rationale="sell near call, buy far call",
-            metadata={},
+            metadata={
+                "selection_mode": "atm_like_same_strike_calendar",
+                "near_dte_min": near_dte_min,
+                "near_dte_max": near_dte_max,
+                "far_dte_min": 36,
+                "far_dte_max": 120,
+                "atm_moneyness_low": 0.9,
+                "atm_moneyness_high": 1.1,
+            },
         )
 
     if strategy_type == "put_calendar":
+        near_dte_min = max(10, min(intent.dte_min, 35))
+        near_dte_max = max(35, intent.dte_max)
+
         return StrategySpec(
             strategy_type="put_calendar",
             underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="nearest"),
-                StrategyLegSpec(action="BUY", option_type="PUT", expiry_rule="next_expiry"),
+                StrategyLegSpec(
+                    action="SELL",
+                    option_type="PUT",
+                    expiry_rule="nearest",
+                    strike=None,
+                    delta_target=None,
+                    quantity=1,
+                    leg_constraints=LegConstraint(
+                        dte_min=near_dte_min,
+                        dte_max=near_dte_max,
+                        max_rel_spread=intent.max_rel_spread,
+                        min_quote_size=intent.min_quote_size,
+                    ),
+                ),
+                StrategyLegSpec(
+                    action="BUY",
+                    option_type="PUT",
+                    expiry_rule="next_expiry",
+                    strike=None,
+                    delta_target=None,
+                    quantity=1,
+                    leg_constraints=LegConstraint(
+                        dte_min=36,
+                        dte_max=120,
+                        max_rel_spread=intent.max_rel_spread,
+                        min_quote_size=intent.min_quote_size,
+                    ),
+                ),
             ],
             constraints=common_constraints,
             rationale="sell near put, buy far put",
-            metadata={},
+            metadata={
+                "selection_mode": "atm_like_same_strike_calendar",
+                "near_dte_min": near_dte_min,
+                "near_dte_max": near_dte_max,
+                "far_dte_min": 36,
+                "far_dte_max": 120,
+                "atm_moneyness_low": 0.9,
+                "atm_moneyness_high": 1.1,
+            },
         )
 
     # ===== diagonal =====
@@ -173,7 +248,6 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
 def compile_intent_to_strategies(intent: IntentSpec) -> List[StrategySpec]:
     candidates: List[tuple[str, float]] = []
 
-    # ===== vol signals =====
     if intent.vol_view == "call_iv_rich":
         candidates += [
             ("call_calendar", 1.0),
@@ -181,7 +255,6 @@ def compile_intent_to_strategies(intent: IntentSpec) -> List[StrategySpec]:
             ("bear_call_spread", 0.75),
             ("bull_call_spread", 0.7),
         ]
-
     elif intent.vol_view == "put_iv_rich":
         candidates += [
             ("put_calendar", 1.0),
@@ -189,45 +262,51 @@ def compile_intent_to_strategies(intent: IntentSpec) -> List[StrategySpec]:
             ("bear_put_spread", 0.75),
             ("bull_put_spread", 0.7),
         ]
+    elif intent.vol_view == "iv_high":
+        candidates += [
+            ("iron_condor", 0.95),
+            ("iron_fly", 0.9),
+            ("call_calendar", 0.75),
+            ("put_calendar", 0.75),
+            ("bear_call_spread", 0.7),
+            ("bull_put_spread", 0.7),
+        ]
 
-    # ===== direction =====
     if intent.market_view == "bullish":
         candidates += [
             ("bull_call_spread", 0.9),
             ("bull_put_spread", 0.85),
         ]
-
     elif intent.market_view == "bearish":
         candidates += [
             ("bear_call_spread", 0.9),
             ("bear_put_spread", 0.85),
         ]
-
-    else:  # neutral
+    else:
         candidates += [
             ("iron_condor", 0.85),
             ("iron_fly", 0.8),
         ]
 
-    # ===== multi-leg preference =====
     if intent.prefer_multi_leg:
         candidates += [
             ("call_calendar", 0.9),
             ("put_calendar", 0.9),
         ]
 
-    # ===== 去重（保留最高权重）=====
     best_map = {}
     for s, w in candidates:
         if s not in best_map or w > best_map[s]:
             best_map[s] = w
 
-    # ===== build =====
     specs: List[StrategySpec] = []
     for strategy_type, weight in best_map.items():
         spec = build_strategy_spec(strategy_type, intent)
-        if spec:
-            spec.metadata["prior_weight"] = weight
-            specs.append(spec)
+        if spec is None:
+            continue
+
+        spec.metadata = spec.metadata or {}
+        spec.metadata["prior_weight"] = weight
+        specs.append(spec)
 
     return specs

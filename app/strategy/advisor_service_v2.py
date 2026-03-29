@@ -16,10 +16,6 @@ from app.strategy.greeks_monitor import build_strategy_greeks_report
 
 
 def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec:
-    """
-    先做规则版解析，不上 LLM。
-    目标是先把链路跑通。
-    """
     t = (text or "").strip().lower()
 
     market_view = "neutral"
@@ -37,15 +33,19 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
     allowed_strategies = None
 
     # 市场方向
-    if any(k in t for k in ["看涨", "偏多", "bullish"]):
+    if any(k in t for k in ["轻微看多", "略看多", "小幅看多", "偏多", "看涨", "bullish"]):
         market_view = "bullish"
-    elif any(k in t for k in ["看跌", "偏空", "bearish"]):
+    elif any(k in t for k in ["轻微看空", "略看空", "小幅看空", "偏空", "看跌", "bearish"]):
         market_view = "bearish"
     else:
         market_view = "neutral"
 
-    # 波动率观点
-    if any(k in t for k in ["认购偏贵", "call贵", "call iv rich", "call_iv_rich"]):
+    # 波动率 / 结构观点
+    if any(k in t for k in ["波动率偏高", "隐波高", "iv高", "vol high", "high iv"]):
+        vol_view = "iv_high"
+    elif any(k in t for k in ["波动率偏低", "隐波低", "iv低", "vol low", "low iv"]):
+        vol_view = "iv_low"
+    elif any(k in t for k in ["认购偏贵", "call贵", "call iv rich", "call_iv_rich"]):
         vol_view = "call_iv_rich"
     elif any(k in t for k in ["认沽偏贵", "put贵", "put iv rich", "put_iv_rich"]):
         vol_view = "put_iv_rich"
@@ -66,10 +66,10 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
     if any(k in t for k in ["不裸卖", "defined risk", "定义损失", "有限风险"]):
         defined_risk_only = True
 
-    if any(k in t for k in ["多腿", "组合", "spread", "calendar", "diagonal"]):
+    if any(k in t for k in ["多腿", "组合", "spread", "calendar", "diagonal", "跨期", "价差"]):
         prefer_multi_leg = True
 
-    # 简单 DTE 提示
+    # DTE 提示
     if any(k in t for k in ["近月", "front month"]):
         dte_min = 10
         dte_max = 35
