@@ -13,6 +13,8 @@ from app.strategy.compiler import compile_intent_to_strategies
 from app.strategy.strategy_ranker import rank_strategies
 from app.strategy.strategy_resolver import resolve_strategy
 from app.strategy.greeks_monitor import build_strategy_greeks_report
+from app.strategy.iv_percentile import build_iv_percentile_report
+from app.strategy.briefing import build_briefing
 
 UNDERLYING_KEYWORDS = {
     # 上证50
@@ -221,9 +223,13 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
     all_resolved: List[ResolvedStrategy] = []
 
     for uid in target_ids:
-        # 为每个标的克隆一份 intent
         uid_intent = intent.model_copy(update={"underlying_id": uid})
-        candidate_specs = compile_intent_to_strategies(uid_intent)
+
+        # 拿该标的 IV percentile
+        iv_report = build_iv_percentile_report(engine, uid)
+        iv_pct = iv_report["composite_percentile"] if iv_report else None
+
+        candidate_specs = compile_intent_to_strategies(uid_intent, iv_pct=iv_pct)
 
         for spec in candidate_specs:
             try:
@@ -249,4 +255,5 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
         backtest_result=backtest_result,
     )
     resp.calendar_recommendations = []
+    resp.briefing = build_briefing(ranked, text)  # ← 加这行
     return resp

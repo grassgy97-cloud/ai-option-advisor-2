@@ -51,6 +51,8 @@ def run_advisor(user_text: str) -> dict:
         print(f"[advisor] llm error: {e}")
         llm_advice = None
 
+
+
     return {
         "mode": mode,
         "parsed_intent": parsed_dict,

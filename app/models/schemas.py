@@ -20,16 +20,14 @@ VolView = Literal[
 ]
 RiskPreference = Literal["low", "medium", "high"]
 StrategyType = Literal[
-    "bear_call_spread",
-    "bull_put_spread",
-    "call_calendar",
-    "put_calendar",
-    "diagonal_call",
-    "diagonal_put",
-    "bull_call_spread",
-    "bear_put_spread",
-    "iron_condor",
-    "iron_fly",
+    "bear_call_spread", "bull_put_spread",
+    "call_calendar",    "put_calendar",
+    "diagonal_call",    "diagonal_put",
+    "bull_call_spread", "bear_put_spread",
+    "iron_condor",      "iron_fly",
+    "long_call",        "long_put",       # 买单边（IV极低时触发）
+    "naked_call",       "naked_put",      # 卖虚值单腿
+    "covered_call",                       # 备兑卖出
 ]
 OptionType = Literal["CALL", "PUT"]
 ActionType = Literal["BUY", "SELL"]
@@ -189,6 +187,7 @@ class AdvisorRunResponse(BaseModel):
     resolved_candidates: List[ResolvedStrategy]
     backtest_result: Dict[str, Any] = Field(default_factory=dict)
     calendar_recommendations: List[CalendarRecommendation] = Field(default_factory=list)
+    briefing: Optional[Dict[str, Any]] = None
 
 
 # ===== 兼容旧系统 schema =====
