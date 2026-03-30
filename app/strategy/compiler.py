@@ -236,13 +236,14 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
 
     # ===== 新策略：单腿买方 =====
 
+    # long_call — delta_target 0.30 → 0.50，rationale 更新
     if strategy_type == "long_call":
         return StrategySpec(
             strategy_type="long_call", underlying_id=underlying_id,
             legs=[
                 StrategyLegSpec(
                     action="BUY", option_type="CALL", expiry_rule="nearest",
-                    strike=None, delta_target=0.30, quantity=1,
+                    strike=None, delta_target=0.50, quantity=1,
                     leg_constraints=LegConstraint(
                         dte_min=45, dte_max=90,
                         max_rel_spread=0.04, min_quote_size=1,
@@ -250,17 +251,18 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
                 ),
             ],
             constraints=common_constraints,
-            rationale="IV极低时买远月虚值call（delta~0.3），以较低权利金博弹性",
+            rationale="IV极低时买远月平值偏虚call（delta~0.5），持有方向性敞口",
             metadata={"selection_mode": "long_single"},
         )
 
+    # long_put — 同上
     if strategy_type == "long_put":
         return StrategySpec(
             strategy_type="long_put", underlying_id=underlying_id,
             legs=[
                 StrategyLegSpec(
                     action="BUY", option_type="PUT", expiry_rule="nearest",
-                    strike=None, delta_target=0.30, quantity=1,
+                    strike=None, delta_target=0.50, quantity=1,
                     leg_constraints=LegConstraint(
                         dte_min=45, dte_max=90,
                         max_rel_spread=0.04, min_quote_size=1,
@@ -268,7 +270,7 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
                 ),
             ],
             constraints=common_constraints,
-            rationale="IV极低时买远月虚值put（delta~0.3），以较低权利金博下行保护",
+            rationale="IV极低时买远月平值偏虚put（delta~0.5），持有方向性敞口",
             metadata={"selection_mode": "long_single"},
         )
 
@@ -310,21 +312,22 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
             metadata={"selection_mode": "naked_single"},
         )
 
+    # compiler.py — covered_call spec，dte 改成 60-180
     if strategy_type == "covered_call":
         return StrategySpec(
             strategy_type="covered_call", underlying_id=underlying_id,
             legs=[
                 StrategyLegSpec(
                     action="SELL", option_type="CALL", expiry_rule="nearest",
-                    strike=None, delta_target=0.25, quantity=1,
+                    strike=None, delta_target=0.20, quantity=1,
                     leg_constraints=LegConstraint(
-                        dte_min=10, dte_max=35,
+                        dte_min=60, dte_max=180,  # 2-6个月
                         max_rel_spread=0.03, min_quote_size=1,
                     ),
                 ),
             ],
             constraints=common_constraints,
-            rationale="备兑卖出虚值call（delta~0.25），持有标的基础上增强收益",
+            rationale="备兑卖出虚值call（DTE 60-180天），目标年化收益率3-5%",
             metadata={"selection_mode": "covered_call"},
         )
 
