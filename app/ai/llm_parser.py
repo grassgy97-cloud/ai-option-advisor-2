@@ -17,7 +17,8 @@ SYSTEM_PROMPT = """你是一个A股ETF期权交易意图解析器。
   "prefer_multi_leg": true,
   "dte_min": 20,
   "dte_max": 45,
-  "banned_strategies": []
+  "banned_strategies": [],
+  "preferred_strategies": []
 }
 
 标的识别（可多个）：
@@ -65,7 +66,20 @@ dte_min/dte_max：
 - 中期/30到60天 → dte_min:30, dte_max:60
 - 未明确 → dte_min:20, dte_max:45
 
-banned_strategies：用户明确说不做某策略时填入，例如 ["call_calendar"]，否则 []"""
+banned_strategies：用户明确说不做某策略时填入，例如 ["call_calendar"]，否则 []
+
+preferred_strategies：用户明确指定或强烈暗示某类策略时填入，否则 []
+- 备兑/备兑增收/covered call/卖备兑 → ["covered_call"]
+- 裸卖put/卖虚值put/naked put → ["naked_put"]
+- 裸卖call/卖虚值call/naked call → ["naked_call"]
+- 日历/跨期价差/calendar → ["call_calendar", "put_calendar"]
+- 对角/diagonal → ["diagonal_call", "diagonal_put"]
+- 铁鹰/iron condor → ["iron_condor"]
+- 牛市价差/bull spread → ["bull_call_spread", "bull_put_spread"]
+- 熊市价差/bear spread → ["bear_call_spread", "bear_put_spread"]
+- 买call/long call → ["long_call"]
+- 买put/long put → ["long_put"]
+- 未明确 → []"""
 
 
 def parse_with_llm(text: str) -> dict:

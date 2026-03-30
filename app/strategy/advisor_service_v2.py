@@ -36,12 +36,14 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
         print("[parse_text_to_intent] LLM failed, falling back to rule parser")
         return _rule_parse_text_to_intent(text, underlying_id)
 
-    # LLM返回的underlying_ids：
-    # - 非空：用LLM识别的标的
-    # - 空列表：用传入的underlying_id（由调用方决定，ALL模式下每个线程传自己的uid）
     underlying_ids = result.get("underlying_ids", [])
     if not underlying_ids:
         underlying_ids = [underlying_id]
+
+    # preferred_strategies → allowed_strategies
+    # LLM识别到用户明确倾向的策略，传给compiler提权用
+    preferred = result.get("preferred_strategies", [])
+    allowed_strategies = preferred if preferred else None
 
     return IntentSpec(
         underlying_id=underlying_ids[0],
@@ -55,6 +57,7 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
         dte_max=result.get("dte_max", 45),
         max_rel_spread=0.03,
         min_quote_size=1,
+        allowed_strategies=allowed_strategies,
         banned_strategies=result.get("banned_strategies", []),
         raw_text=text,
     )
@@ -122,6 +125,10 @@ def _rule_parse_text_to_intent(text: str, underlying_id: str = "510300") -> Inte
     if any(k in t for k in ["不做对角", "不要diagonal", "no diagonal"]):
         banned_strategies.extend(["diagonal_call", "diagonal_put"])
 
+    # 规则fallback里也支持备兑识别
+    if any(k in t for k in ["备兑", "covered call", "卖备兑"]):
+        allowed_strategies = ["covered_call"]
+
     underlying_ids = _parse_underlying_ids(t, underlying_id)
     return IntentSpec(
         underlying_id=underlying_ids[0],
@@ -178,10 +185,6 @@ def build_disabled_backtest(resolved_candidates):
 def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> AdvisorRunResponse:
     intent = parse_text_to_intent(text=text, underlying_id=underlying_id)
 
-    # effective_underlying_ids：
-    # - 用户指定了标的（LLM识别到）→ 用LLM结果
-    # - 未指定（LLM返回空，fallback到underlying_id参数）→ 只跑underlying_id
-    # - ALL模式下每个线程传自己的uid，LLM返回空时就只跑那个uid
     target_ids = intent.effective_underlying_ids
 
     all_resolved: List[ResolvedStrategy] = []
