@@ -1,264 +1,711 @@
-"""
-covered_call_advisor.py
-备兑策略专项推荐——针对已持仓标的（510300 x2手，588000 x4手）
-
-使用：python covered_call_advisor.py
-"""
 from __future__ import annotations
 
-from datetime import date
-from typing import Any, Dict, List, Optional
+from collections import defaultdict
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Tuple
+import logging
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from app.core.db import engine
+from app.models.schemas import ResolvedLeg, ResolvedStrategy, StrategyLegSpec, StrategySpec
 
-# ── 持仓配置 ──────────────────────────────────────────────
-POSITIONS = {
-    "510300": {"hands": 2,  "name": "沪深300ETF"},
-    "588000": {"hands": 4,  "name": "科创50ETF"},
-}
+logger = logging.getLogger(__name__)
 
-# ── 筛选参数 ──────────────────────────────────────────────
-DTE_MIN          = 60       # 最短到期天数
-DTE_MAX          = 180      # 最长到期天数
-DELTA_TARGET     = 0.20     # 目标delta（虚值程度）
-DELTA_TOLERANCE  = 0.12     # delta容差（0.08~0.32都纳入候选）
-MAX_REL_SPREAD   = 0.05     # 最大相对价差（流动性过滤）
-FEE_PER_SHARE    = 0.0004   # 手续费 4元/手，1手=10000份
-TOP_N            = 3        # 每个标的输出几个推荐
 
-# ── 年化计算 ──────────────────────────────────────────────
-def calc_annualized_yield(
-    credit: float,
-    spot: float,
-    dte: int,
-    fee: float = FEE_PER_SHARE,
-) -> Optional[float]:
-    if spot <= 0 or dte <= 0:
+def _safe_float(x: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def _safe_int(x: Any, default: Optional[int] = None) -> Optional[int]:
+    try:
+        if x is None:
+            return default
+        return int(x)
+    except Exception:
+        return default
+
+
+def _to_date(x: Any) -> Optional[date]:
+    if x is None:
         return None
-    net = credit - fee
-    if net <= 0:
-        return None
-    return net / spot / (dte / 360)
+    if isinstance(x, date) and not isinstance(x, datetime):
+        return x
+    if isinstance(x, datetime):
+        return x.date()
+    s = str(x).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            pass
+    return None
 
 
-# ── 挂单建议 ──────────────────────────────────────────────
-def suggest_limit_price(bid: float, ask: float) -> float:
-    """
-    卖方挂单建议：偏bid方向1/3处。
-    比mid更保守，成交概率合理，不追ask。
-    """
-    return round(bid + (ask - bid) / 3, 4)
+def quote_row_from_mapping(row: Dict[str, Any]) -> Dict[str, Any]:
+    contract_id = row.get("contract_id")
+    underlying_id = row.get("underlying_id")
+
+    raw_option_type = (row.get("option_type") or "").upper()
+    if raw_option_type in ("C", "CALL"):
+        option_type = "CALL"
+    elif raw_option_type in ("P", "PUT"):
+        option_type = "PUT"
+    else:
+        option_type = raw_option_type
+
+    expiry_date = _to_date(row.get("expiry_date"))
+
+    return {
+        "contract_id": str(contract_id) if contract_id is not None else None,
+        "underlying_id": str(underlying_id) if underlying_id is not None else None,
+        "option_type": option_type,
+        "expiry_date": expiry_date,
+        "strike": _safe_float(row.get("strike")),
+        "spot_price": _safe_float(row.get("spot_price")),
+        "price": _safe_float(row.get("option_market_price")),
+        "pricing_basis": row.get("pricing_basis"),
+        "dte": _safe_int(row.get("dte_calendar")),
+        "t_years": _safe_float(row.get("t_years")),
+        "rf_rate": _safe_float(row.get("rf_rate")),
+        "iv": _safe_float(row.get("implied_vol")),
+        "delta": _safe_float(row.get("delta")),
+        "gamma": _safe_float(row.get("gamma")),
+        "theta": _safe_float(row.get("theta")),
+        "vega": _safe_float(row.get("vega")),
+    }
 
 
-# ── 从DB拉最新合约 ───────────────────────────────────────
-def fetch_candidates(eng: Engine, underlying_id: str) -> List[Dict[str, Any]]:
+def fetch_latest_option_quotes(engine, underlying_id: str) -> dict[str, dict]:
+    sql = text("""
+    WITH latest AS (
+      SELECT MAX(fetch_time) AS max_fetch_time
+      FROM option_quote_snapshots
+      WHERE underlying_id = :underlying_id
+    )
+    SELECT
+      contract_id,
+      bid_price1,
+      ask_price1,
+      bid_vol1,
+      ask_vol1,
+      fetch_time
+    FROM option_quote_snapshots
+    WHERE underlying_id = :underlying_id
+      AND fetch_time = (SELECT max_fetch_time FROM latest)
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"underlying_id": underlying_id}).mappings().all()
+
+    out = {}
+    for r in rows:
+        bid = r.get("bid_price1")
+        ask = r.get("ask_price1")
+        mid = (bid + ask) / 2 if bid is not None and ask is not None else None
+        out[str(r["contract_id"])] = {
+            **dict(r),
+            "mid_price": mid,
+        }
+    return out
+
+
+def fetch_latest_option_factors(engine: Engine, underlying_id: str) -> List[Dict[str, Any]]:
     sql = text("""
         WITH latest AS (
             SELECT MAX(fetch_time) AS max_fetch_time
             FROM option_factor_snapshots
-            WHERE underlying_id = :uid
-        ),
-        factors AS (
-            SELECT
-                f.contract_id,
-                f.underlying_id,
-                f.option_type,
-                f.expiry_date,
-                f.strike,
-                f.spot_price,
-                f.implied_vol,
-                f.delta,
-                f.gamma,
-                f.theta,
-                f.vega,
-                f.dte_calendar,
-                f.fetch_time
-            FROM option_factor_snapshots f, latest
-            WHERE f.underlying_id = :uid
-              AND f.fetch_time = latest.max_fetch_time
-              AND f.option_type IN ('C', 'CALL')
-              AND f.delta IS NOT NULL
-              AND f.implied_vol IS NOT NULL
-              AND f.dte_calendar BETWEEN :dte_min AND :dte_max
-        ),
-        quotes AS (
-            SELECT
-                q.contract_id,
-                q.bid_price1,
-                q.ask_price1
-            FROM option_quote_snapshots q
-            JOIN latest ON q.fetch_time = latest.max_fetch_time
-            WHERE q.underlying_id = :uid
+            WHERE underlying_id = :underlying_id
         )
         SELECT
-            f.*,
-            q.bid_price1,
-            q.ask_price1,
-            (q.bid_price1 + q.ask_price1) / 2.0 AS mid_price
-        FROM factors f
-        LEFT JOIN quotes q ON f.contract_id = q.contract_id
-        WHERE q.bid_price1 IS NOT NULL
-          AND q.ask_price1 IS NOT NULL
-          AND q.bid_price1 > 0
-          AND q.ask_price1 > 0
-        ORDER BY f.dte_calendar ASC, f.delta ASC
+            contract_id, underlying_id, option_type, expiry_date, strike,
+            spot_price, option_market_price, pricing_basis, dte_calendar,
+            t_years, rf_rate, implied_vol, delta, gamma, theta, vega, fetch_time
+        FROM option_factor_snapshots
+        WHERE underlying_id = :underlying_id
+          AND fetch_time = (SELECT max_fetch_time FROM latest)
     """)
-
-    with eng.connect() as conn:
-        rows = conn.execute(sql, {
-            "uid": underlying_id,
-            "dte_min": DTE_MIN,
-            "dte_max": DTE_MAX,
-        }).mappings().all()
-
-    return [dict(r) for r in rows]
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"underlying_id": underlying_id}).mappings().all()
+    return [quote_row_from_mapping(dict(r)) for r in rows]
 
 
-# ── 筛选+评分 ────────────────────────────────────────────
-def score_and_filter(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    results = []
+def merge_factor_and_quote_rows(factor_rows, quote_rows: dict[str, dict]) -> list[dict]:
+    merged = []
+    for f in factor_rows:
+        contract_id = str(f["contract_id"])
+        q = quote_rows.get(contract_id, {})
+        merged.append({**f, **q, "contract_id": contract_id})
+    return merged
 
-    for r in rows:
-        delta    = abs(float(r["delta"] or 0))
-        bid      = float(r["bid_price1"])
-        ask      = float(r["ask_price1"])
-        mid      = float(r["mid_price"])
-        spot     = float(r["spot_price"] or 0)
-        dte      = int(r["dte_calendar"])
-        strike   = float(r["strike"])
-        iv       = float(r["implied_vol"] or 0)
 
-        # 行权价过滤：非0.05整数倍的是除权合约，份数不标准，不能做备兑
-        strike_rounded = round(strike * 20) / 20  # 最近的0.05整数倍
-        if abs(strike - strike_rounded) > 0.001:
+def fetch_latest_spot(engine: Engine, underlying_id: str) -> float:
+    sql = text("""
+        WITH latest AS (
+            SELECT MAX(fetch_time) AS max_fetch_time
+            FROM option_factor_snapshots
+            WHERE underlying_id = :underlying_id
+        )
+        SELECT spot_price
+        FROM option_factor_snapshots
+        WHERE underlying_id = :underlying_id
+          AND fetch_time = (SELECT max_fetch_time FROM latest)
+          AND spot_price IS NOT NULL
+        LIMIT 1
+    """)
+    with engine.connect() as conn:
+        row = conn.execute(sql, {"underlying_id": underlying_id}).mappings().first()
+    if not row:
+        raise ValueError(f"No latest spot found for underlying_id={underlying_id}")
+    spot = _safe_float(row.get("spot_price"))
+    if spot is None or spot <= 0:
+        raise ValueError(f"Invalid spot found for underlying_id={underlying_id}")
+    return spot
+
+
+def filter_quotes_for_constraints(
+    quotes: list[dict],
+    option_type: str | None = None,
+    dte_min: int | None = None,
+    dte_max: int | None = None,
+    max_rel_spread: float | None = None,
+    min_quote_size: int | None = None,
+) -> list[dict]:
+    out = []
+
+    for q in quotes:
+        if option_type and q.get("option_type") != option_type:
             continue
 
-        # delta筛选
-        if abs(delta - DELTA_TARGET) > DELTA_TOLERANCE:
+        dte = q.get("dte")
+        if dte is None:
+            dte = q.get("dte_calendar")
+        if dte is None:
+            continue
+        if dte_min is not None and dte < dte_min:
+            continue
+        if dte_max is not None and dte > dte_max:
             continue
 
-        # 流动性筛选
-        if mid <= 0:
-            continue
-        rel_spread = (ask - bid) / mid
-        if rel_spread > MAX_REL_SPREAD:
-            continue
-
-        # 年化收益率
-        ann_yield = calc_annualized_yield(mid, spot, dte)
-        if ann_yield is None:
+        price = q.get("price")
+        if price is None:
+            price = q.get("option_market_price")
+        if price is None or price <= 0:
             continue
 
-        # 挂单建议
-        limit_price = suggest_limit_price(bid, ask)
+        bid = q.get("bid_price1")
+        ask = q.get("ask_price1")
+        bid_vol = q.get("bid_vol1")
+        ask_vol = q.get("ask_vol1")
 
-        # 被行权缓冲（strike相对spot的上行空间）
-        upside_buffer = (strike / spot - 1.0) if spot > 0 else None
+        if min_quote_size is not None:
+            if bid_vol is None or ask_vol is None:
+                continue
+            if bid_vol < min_quote_size or ask_vol < min_quote_size:
+                continue
 
-        # 综合评分：年化3-5%甜区给高分，过高过低降分
-        if 0.03 <= ann_yield <= 0.05:
-            score = 1.0
-        elif 0.05 < ann_yield <= 0.08:
-            score = 0.85
-        elif 0.02 <= ann_yield < 0.03:
-            score = 0.75
-        elif 0.08 < ann_yield <= 0.12:
-            score = 0.65
-        elif ann_yield > 0.12:
-            score = 0.50
-        else:
-            score = 0.30
+        if max_rel_spread is not None:
+            if bid is None or ask is None or bid <= 0 or ask <= 0:
+                continue
+            mid = q.get("mid_price")
+            if mid is None:
+                mid = (bid + ask) / 2
+            if mid <= 0:
+                continue
+            rel_spread = (ask - bid) / mid
+            if rel_spread > max_rel_spread:
+                continue
 
-        # delta越接近目标加分
-        delta_bonus = max(0, 0.10 * (1 - abs(delta - DELTA_TARGET) / DELTA_TOLERANCE))
-        score += delta_bonus
+        # 行权价过滤：非0.05整数倍的是除权合约，份数不标准，不能构建组合
+        strike = q.get("strike")
+        if strike is not None:
+            strike_rounded = round(float(strike) * 20) / 20
+            if abs(float(strike) - strike_rounded) > 0.001:
+                continue
 
-        # 流动性加分
-        if rel_spread <= 0.01:
-            score += 0.05
-        elif rel_spread <= 0.03:
-            score += 0.02
+        out.append(q)
 
-        results.append({
-            "contract_id":    r["contract_id"],
-            "underlying_id":  r["underlying_id"],
-            "expiry_date":    r["expiry_date"],
-            "strike":         strike,
-            "dte":            dte,
-            "delta":          round(delta, 3),
-            "iv":             round(iv, 4),
-            "spot":           round(spot, 4),
-            "bid":            round(bid, 4),
-            "ask":            round(ask, 4),
-            "mid":            round(mid, 4),
-            "limit_price":    limit_price,
-            "rel_spread":     round(rel_spread, 4),
-            "ann_yield":      round(ann_yield, 4),
-            "upside_buffer":  round(upside_buffer, 4) if upside_buffer else None,
-            "score":          round(score, 3),
-        })
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results
+    return out
 
 
-# ── 输出 ─────────────────────────────────────────────────
-def print_recommendations(underlying_id: str, hands: int, name: str, candidates: List[Dict]):
-    shares_per_hand = 10000
-    total_shares = hands * shares_per_hand
+def group_by_expiry(quotes: List[Dict[str, Any]]) -> Dict[date, List[Dict[str, Any]]]:
+    grouped: Dict[date, List[Dict[str, Any]]] = defaultdict(list)
+    for q in quotes:
+        if q["expiry_date"] is not None:
+            grouped[q["expiry_date"]].append(q)
+    for expiry in grouped:
+        grouped[expiry] = sorted(grouped[expiry], key=lambda x: x["strike"])
+    return dict(sorted(grouped.items(), key=lambda kv: kv[0]))
 
-    print(f"\n{'='*60}")
-    print(f"  {name}（{underlying_id}）× {hands}手 = {total_shares:,}份")
-    print(f"{'='*60}")
+
+def choose_expiry(
+    grouped: Dict[date, List[Dict[str, Any]]],
+    expiry_rule: str,
+    reference_expiry: Optional[date] = None,
+) -> Optional[date]:
+    expiries = list(grouped.keys())
+    if not expiries:
+        return None
+    if expiry_rule == "nearest":
+        return expiries[0]
+    if expiry_rule == "same_expiry":
+        return reference_expiry
+    if expiry_rule == "next_expiry":
+        if reference_expiry is None:
+            return expiries[1] if len(expiries) >= 2 else None
+        later = [e for e in expiries if e > reference_expiry]
+        return later[0] if later else None
+    if expiry_rule == "farther_expiry":
+        return expiries[-1]
+    return None
+
+
+def choose_by_delta_target(
+    quotes: List[Dict[str, Any]],
+    delta_target: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    if not quotes:
+        return None
+    if delta_target is None:
+        return quotes[0]
+    valid = [q for q in quotes if q["delta"] is not None]
+    if not valid:
+        return None
+    return min(valid, key=lambda q: abs(abs(q["delta"]) - delta_target))
+
+
+def choose_same_expiry_leg(
+    quotes: List[Dict[str, Any]],
+    option_type: str,
+    expiry: date,
+    delta_target: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    pool = [q for q in quotes if q["option_type"] == option_type and q["expiry_date"] == expiry]
+    return choose_by_delta_target(pool, delta_target)
+
+
+def choose_vertical_buy_leg(
+    quotes: List[Dict[str, Any]],
+    first_leg: Dict[str, Any],
+    strategy_type: str,
+    delta_target: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    option_type = first_leg["option_type"]
+    expiry = first_leg["expiry_date"]
+    first_strike = first_leg["strike"]
+
+    same_expiry = [
+        q for q in quotes
+        if q["option_type"] == option_type and q["expiry_date"] == expiry
+    ]
+    if not same_expiry:
+        return None
+
+    if strategy_type == "bear_call_spread":
+        candidates = [q for q in same_expiry if q["strike"] > first_strike]
+    elif strategy_type == "bull_put_spread":
+        candidates = [q for q in same_expiry if q["strike"] < first_strike]
+    elif strategy_type == "bull_call_spread":
+        candidates = [q for q in same_expiry if q["strike"] > first_strike]
+    elif strategy_type == "bear_put_spread":
+        candidates = [q for q in same_expiry if q["strike"] < first_strike]
+    else:
+        return None
 
     if not candidates:
-        print("  ⚠️  无符合条件的合约（检查DTE/delta/流动性参数）")
-        return
+        return None
 
-    top = candidates[:TOP_N]
-    spot = top[0]["spot"]
-    print(f"  当前标的价格：{spot}")
-    print()
-
-    for i, c in enumerate(top, 1):
-        total_credit    = c["mid"] * total_shares
-        total_credit_lp = c["limit_price"] * total_shares
-        total_fee       = FEE_PER_SHARE * total_shares  # 4元/手 × 手数
-
-        print(f"  【推荐{i}】{'★' * max(1, round(c['score']))}  score={c['score']}")
-        print(f"    合约：{c['contract_id']}")
-        print(f"    到期：{c['expiry_date']}  DTE={c['dte']}天")
-        print(f"    行权价：{c['strike']}  （上行缓冲 {c['upside_buffer']:.1%}）")
-        print(f"    Delta：{c['delta']}  IV：{c['iv']:.1%}")
-        print()
-        print(f"    报价：bid={c['bid']}  ask={c['ask']}  mid={c['mid']}")
-        print(f"    ▶ 建议挂单价：{c['limit_price']}  （偏bid方向1/3）")
-        print(f"    ▶ 预计总收入：{total_credit:.2f}元（按mid）/ {total_credit_lp:.2f}元（按挂单价）")
-        print(f"    ▶ 手续费：约{total_fee:.2f}元")
-        print(f"    ▶ 年化收益率：{c['ann_yield']:.1%}（按mid）")
-        print(f"    ▶ 流动性价差：{c['rel_spread']:.1%}")
-        print()
+    picked = choose_by_delta_target(candidates, delta_target)
+    if picked is not None:
+        return picked
+    return min(candidates, key=lambda q: abs(q["strike"] - first_strike))
 
 
-# ── 主入口 ───────────────────────────────────────────────
-def main():
-    print("\n📊 备兑策略推荐报告")
-    print(f"筛选条件：DTE {DTE_MIN}-{DTE_MAX}天，delta目标 {DELTA_TARGET}±{DELTA_TOLERANCE}")
+def choose_atm_like_leg(
+    quotes: List[Dict[str, Any]],
+    option_type: str,
+    expiry: date,
+    spot: float,
+) -> Optional[Dict[str, Any]]:
+    pool = [
+        q for q in quotes
+        if q["option_type"] == option_type
+        and q["expiry_date"] == expiry
+        and q["strike"] is not None
+        and spot is not None
+        and spot > 0
+    ]
+    if not pool:
+        return None
+    return min(pool, key=lambda q: abs(q["strike"] / spot - 1.0))
 
-    for uid, pos in POSITIONS.items():
-        rows = fetch_candidates(engine, uid)
-        candidates = score_and_filter(rows)
-        print_recommendations(uid, pos["hands"], pos["name"], candidates)
 
-    print("\n⚠️  注意事项：")
-    print("  1. 挂单价为参考，实际可根据市场深度微调")
-    print("  2. 被行权时需交割现货，确认持仓数量足够")
-    print("  3. 建议在开盘后流动性好的时段挂单")
-    print("  4. 如果没有成交，可以在收盘前1小时再次评估")
+def choose_same_strike_leg(
+    quotes: List[Dict[str, Any]],
+    option_type: str,
+    expiry: date,
+    strike: float,
+    delta_target: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    pool = [
+        q for q in quotes
+        if q["option_type"] == option_type
+        and q["expiry_date"] == expiry
+        and q["strike"] is not None
+    ]
+    if not pool:
+        return None
+
+    exact = [q for q in pool if q["strike"] == strike]
+    if exact:
+        if delta_target is not None:
+            picked = choose_by_delta_target(exact, delta_target)
+            if picked is not None:
+                return picked
+        return exact[0]
+
+    nearest_strike = min(pool, key=lambda q: abs(q["strike"] - strike))["strike"]
+    near_pool = [q for q in pool if q["strike"] == nearest_strike]
+    if delta_target is not None:
+        picked = choose_by_delta_target(near_pool, delta_target)
+        if picked is not None:
+            return picked
+    return near_pool[0] if near_pool else None
 
 
-if __name__ == "__main__":
-    main()
+def choose_calendar_near_leg(
+    near_quotes: List[Dict[str, Any]],
+    far_quotes: List[Dict[str, Any]],
+    option_type: str,
+    near_expiry: date,
+    far_expiry: date,
+    spot: float,
+) -> Optional[Dict[str, Any]]:
+    near_pool = [
+        q for q in near_quotes
+        if q["option_type"] == option_type
+        and q["expiry_date"] == near_expiry
+        and q["strike"] is not None
+    ]
+    far_pool = [
+        q for q in far_quotes
+        if q["option_type"] == option_type
+        and q["expiry_date"] == far_expiry
+        and q["strike"] is not None
+    ]
+    if not near_pool or not far_pool or spot is None or spot <= 0:
+        return None
+
+    far_strikes = {q["strike"] for q in far_pool}
+    matchable_near = [q for q in near_pool if q["strike"] in far_strikes]
+    if not matchable_near:
+        return None
+    return min(matchable_near, key=lambda q: abs(q["strike"] / spot - 1.0))
+
+
+def build_resolved_leg(q: dict, action: str, quantity: int = 1):
+    price = q.get("price")
+    if price is None:
+        price = q.get("option_market_price")
+
+    bid = q.get("bid_price1")
+    ask = q.get("ask_price1")
+    mid = q.get("mid_price")
+
+    if bid is None: bid = price
+    if ask is None: ask = price
+    if mid is None: mid = price
+
+    iv = q.get("iv")
+    if iv is None:
+        iv = q.get("implied_vol")
+
+    dte = q.get("dte")
+    if dte is None:
+        dte = q.get("dte_calendar")
+
+    expiry_raw = q.get("expiry_date")
+    expiry_date = expiry_raw.isoformat() if expiry_raw is not None else None
+
+    return ResolvedLeg(
+        contract_id=str(q["contract_id"]),
+        action=action,
+        quantity=quantity,
+        option_type=q.get("option_type"),
+        strike=q.get("strike"),
+        expiry_date=expiry_date,
+        bid=bid,
+        ask=ask,
+        mid=mid,
+        delta=q.get("delta"),
+        gamma=q.get("gamma"),
+        theta=q.get("theta"),
+        vega=q.get("vega"),
+        iv=iv,
+        dte=dte,
+    )
+
+
+def calc_net_premium(legs: List[ResolvedLeg]) -> Tuple[float, Optional[float], Optional[float]]:
+    total = 0.0
+    for leg in legs:
+        leg_value = leg.mid * leg.quantity
+        if leg.action == "BUY":
+            total -= leg_value
+        else:
+            total += leg_value
+    net_credit = total if total > 0 else None
+    net_debit = -total if total < 0 else None
+    return total, net_credit, net_debit
+
+
+def _get_leg_dte_bounds(strategy: StrategySpec, leg: StrategyLegSpec, leg_index: int) -> Tuple[int, int]:
+    if getattr(leg, "leg_constraints", None) is not None:
+        lc = leg.leg_constraints
+        dte_min = lc.dte_min if lc.dte_min is not None else strategy.constraints.dte_min
+        dte_max = lc.dte_max if lc.dte_max is not None else strategy.constraints.dte_max
+        return dte_min, dte_max
+
+    md = strategy.metadata or {}
+    if strategy.strategy_type in ("call_calendar", "put_calendar", "diagonal_call", "diagonal_put"):
+        if leg_index == 0:
+            dte_min = md.get("near_dte_min", strategy.constraints.dte_min)
+            dte_max = md.get("near_dte_max", strategy.constraints.dte_max)
+            return int(dte_min), int(dte_max)
+        elif leg_index == 1:
+            dte_min = md.get("far_dte_min", strategy.constraints.dte_min)
+            dte_max = md.get("far_dte_max", strategy.constraints.dte_max)
+            return int(dte_min), int(dte_max)
+
+    return strategy.constraints.dte_min, strategy.constraints.dte_max
+
+
+def _filter_quotes_for_leg(
+    quotes: List[Dict[str, Any]],
+    strategy: StrategySpec,
+    leg: StrategyLegSpec,
+    leg_index: int,
+) -> List[Dict[str, Any]]:
+    dte_min, dte_max = _get_leg_dte_bounds(strategy, leg, leg_index)
+    return filter_quotes_for_constraints(
+        quotes=quotes,
+        option_type=leg.option_type,
+        dte_min=dte_min,
+        dte_max=dte_max,
+        max_rel_spread=strategy.constraints.max_rel_spread,
+        min_quote_size=strategy.constraints.min_quote_size,
+    )
+
+
+def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[ResolvedStrategy]:
+    if strategy.strategy_type in ("iron_condor", "iron_fly"):
+        return _resolve_iron_structure(engine, strategy)
+
+    factor_rows = fetch_latest_option_factors(engine, strategy.underlying_id)
+    quote_rows = fetch_latest_option_quotes(engine, strategy.underlying_id)
+    quotes = merge_factor_and_quote_rows(factor_rows, quote_rows)
+
+    _OT_MAP = {"C": "CALL", "P": "PUT"}
+    for q in quotes:
+        q["option_type"] = _OT_MAP.get(q.get("option_type", ""), q.get("option_type", ""))
+
+    spot = fetch_latest_spot(engine, strategy.underlying_id)
+
+    logger.debug(f"[resolver] total quotes = {len(quotes)}")
+    logger.debug(f"[resolver] strategy_type = {strategy.strategy_type}")
+
+    if not quotes:
+        return None
+
+    resolved_legs: List[ResolvedLeg] = []
+    calendar_second_filtered: Optional[List[Dict[str, Any]]] = None
+    calendar_second_expiry: Optional[date] = None
+
+    first_leg_spec: StrategyLegSpec = strategy.legs[0]
+    first_dte_min, first_dte_max = _get_leg_dte_bounds(strategy, first_leg_spec, 0)
+    logger.debug(f"[resolver] first leg dte range = {first_dte_min} ~ {first_dte_max}")
+
+    first_filtered = _filter_quotes_for_leg(quotes, strategy, first_leg_spec, 0)
+    logger.debug(f"[resolver] first leg filtered quotes = {len(first_filtered)}")
+
+    if not first_filtered:
+        return None
+
+    first_grouped = group_by_expiry(first_filtered)
+    first_expiry = choose_expiry(first_grouped, first_leg_spec.expiry_rule)
+    logger.debug(f"[resolver] first_expiry = {first_expiry}")
+    if first_expiry is None:
+        return None
+
+    if strategy.strategy_type in ("call_calendar", "put_calendar"):
+        if len(strategy.legs) < 2:
+            return None
+        second_leg_spec: StrategyLegSpec = strategy.legs[1]
+        calendar_second_filtered = _filter_quotes_for_leg(quotes, strategy, second_leg_spec, 1)
+        calendar_second_grouped = group_by_expiry(calendar_second_filtered)
+        calendar_second_expiry = choose_expiry(
+            calendar_second_grouped, second_leg_spec.expiry_rule, reference_expiry=first_expiry,
+        )
+        logger.debug(f"[resolver] preview second_expiry = {calendar_second_expiry}")
+        if calendar_second_expiry is None:
+            return None
+        first_leg_quote = choose_calendar_near_leg(
+            near_quotes=first_filtered, far_quotes=calendar_second_filtered,
+            option_type=first_leg_spec.option_type,
+            near_expiry=first_expiry, far_expiry=calendar_second_expiry, spot=spot,
+        )
+    elif strategy.strategy_type in ("diagonal_call", "diagonal_put"):
+        first_leg_quote = choose_same_expiry_leg(
+            first_filtered, option_type=first_leg_spec.option_type,
+            expiry=first_expiry, delta_target=first_leg_spec.delta_target,
+        )
+    else:
+        first_leg_quote = choose_same_expiry_leg(
+            first_filtered, option_type=first_leg_spec.option_type,
+            expiry=first_expiry, delta_target=first_leg_spec.delta_target,
+        )
+
+    logger.debug(f"[resolver] first_leg_quote found = {first_leg_quote is not None}")
+    if first_leg_quote is None:
+        return None
+
+    resolved_legs.append(build_resolved_leg(first_leg_quote, action=first_leg_spec.action, quantity=first_leg_spec.quantity))
+
+    if len(strategy.legs) >= 2:
+        second_leg_spec: StrategyLegSpec = strategy.legs[1]
+        second_dte_min, second_dte_max = _get_leg_dte_bounds(strategy, second_leg_spec, 1)
+        logger.debug(f"[resolver] second leg dte range = {second_dte_min} ~ {second_dte_max}")
+
+        if strategy.strategy_type in ("bear_call_spread", "bull_put_spread", "bull_call_spread", "bear_put_spread"):
+            second_leg_quote = choose_vertical_buy_leg(
+                quotes=first_filtered, first_leg=first_leg_quote,
+                strategy_type=strategy.strategy_type, delta_target=second_leg_spec.delta_target,
+            )
+        else:
+            if strategy.strategy_type in ("call_calendar", "put_calendar"):
+                second_filtered = calendar_second_filtered or []
+                second_expiry = calendar_second_expiry
+            else:
+                second_filtered = _filter_quotes_for_leg(quotes, strategy, second_leg_spec, 1)
+                logger.debug(f"[resolver] second leg filtered quotes = {len(second_filtered)}")
+                if not second_filtered:
+                    return None
+                second_grouped = group_by_expiry(second_filtered)
+                second_expiry = choose_expiry(second_grouped, second_leg_spec.expiry_rule, reference_expiry=first_expiry)
+
+            logger.debug(f"[resolver] second_expiry = {second_expiry}")
+            if second_expiry is None:
+                return None
+
+            if strategy.strategy_type in ("call_calendar", "put_calendar"):
+                second_leg_quote = choose_same_strike_leg(
+                    second_filtered, option_type=second_leg_spec.option_type,
+                    expiry=second_expiry, strike=first_leg_quote["strike"],
+                    delta_target=second_leg_spec.delta_target,
+                )
+            elif strategy.strategy_type in ("diagonal_call", "diagonal_put"):
+                second_leg_quote = choose_same_expiry_leg(
+                    second_filtered, option_type=second_leg_spec.option_type,
+                    expiry=second_expiry, delta_target=second_leg_spec.delta_target,
+                )
+            else:
+                second_leg_quote = choose_same_expiry_leg(
+                    second_filtered, option_type=second_leg_spec.option_type,
+                    expiry=second_expiry, delta_target=second_leg_spec.delta_target,
+                )
+
+        logger.debug(f"[resolver] second_leg_quote found = {second_leg_quote is not None}")
+        if second_leg_quote is None:
+            return None
+
+        resolved_legs.append(build_resolved_leg(second_leg_quote, action=second_leg_spec.action, quantity=second_leg_spec.quantity))
+
+    net_premium, net_credit, net_debit = calc_net_premium(resolved_legs)
+
+    return ResolvedStrategy(
+        strategy_type=strategy.strategy_type,
+        underlying_id=strategy.underlying_id,
+        spot_price=spot,
+        legs=resolved_legs,
+        net_premium=net_premium,
+        net_credit=net_credit,
+        net_debit=net_debit,
+        rationale=strategy.rationale,
+        metadata={"source": "strategy_resolver", "strategy_metadata": strategy.metadata},
+    )
+
+
+def _resolve_iron_structure(engine: Engine, strategy: StrategySpec) -> Optional[ResolvedStrategy]:
+    factor_rows = fetch_latest_option_factors(engine, strategy.underlying_id)
+    quote_rows = fetch_latest_option_quotes(engine, strategy.underlying_id)
+    quotes = merge_factor_and_quote_rows(factor_rows, quote_rows)
+
+    _OT_MAP = {"C": "CALL", "P": "PUT"}
+    for q in quotes:
+        q["option_type"] = _OT_MAP.get(q.get("option_type", ""), q.get("option_type", ""))
+
+    spot = fetch_latest_spot(engine, strategy.underlying_id)
+
+    if not quotes:
+        return None
+
+    filtered = filter_quotes_for_constraints(
+        quotes=quotes,
+        dte_min=strategy.constraints.dte_min,
+        dte_max=strategy.constraints.dte_max,
+        max_rel_spread=strategy.constraints.max_rel_spread,
+        min_quote_size=strategy.constraints.min_quote_size,
+    )
+    if not filtered:
+        return None
+
+    grouped = group_by_expiry(filtered)
+    expiry = choose_expiry(grouped, "nearest")
+    if expiry is None:
+        return None
+
+    same_expiry = [q for q in filtered if q["expiry_date"] == expiry]
+    calls = [q for q in same_expiry if q["option_type"] == "CALL"]
+    puts = [q for q in same_expiry if q["option_type"] == "PUT"]
+
+    if not calls or not puts:
+        return None
+
+    if strategy.strategy_type == "iron_condor":
+        call_sell = choose_by_delta_target(calls, 0.30)
+        put_sell  = choose_by_delta_target(puts,  0.30)
+        call_buy  = choose_by_delta_target([q for q in calls if q["strike"] > call_sell["strike"]], 0.15) if call_sell else None
+        put_buy   = choose_by_delta_target([q for q in puts  if q["strike"] < put_sell["strike"]],  0.15) if put_sell  else None
+    else:  # iron_fly
+        call_sell = choose_by_delta_target(calls, 0.50)
+        put_sell  = choose_by_delta_target(puts,  0.50)
+        call_buy  = choose_by_delta_target([q for q in calls if q["strike"] > call_sell["strike"]], 0.20) if call_sell else None
+        put_buy   = choose_by_delta_target([q for q in puts  if q["strike"] < put_sell["strike"]],  0.20) if put_sell  else None
+
+    if not all([call_sell, call_buy, put_sell, put_buy]):
+        return None
+
+    legs = [
+        build_resolved_leg(call_sell, "SELL"),
+        build_resolved_leg(call_buy,  "BUY"),
+        build_resolved_leg(put_sell,  "SELL"),
+        build_resolved_leg(put_buy,   "BUY"),
+    ]
+
+    net_premium, net_credit, net_debit = calc_net_premium(legs)
+
+    return ResolvedStrategy(
+        strategy_type=strategy.strategy_type,
+        underlying_id=strategy.underlying_id,
+        spot_price=spot,
+        legs=legs,
+        net_premium=net_premium,
+        net_credit=net_credit,
+        net_debit=net_debit,
+        rationale=strategy.rationale,
+        metadata={"source": "strategy_resolver", "strategy_metadata": strategy.metadata},
+    )
