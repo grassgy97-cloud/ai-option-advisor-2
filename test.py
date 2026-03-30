@@ -21,9 +21,9 @@ if res1.briefing:
     for row in res1.briefing.get("table", []):
         print(
             f"  #{row['rank']} {row['underlying']} {row['strategy']:<20} "
-            f"score={row['score']} {row['cost']} "
-            f"IV={row['iv_label']}({row['iv_pct']}) "
-            f"delta={row['net_delta']}"
+            f"score={row['score']} {row['cost']}\n"
+            f"    legs: {row['legs']}\n"
+            f"    IV={row['iv_label']}({row['iv_pct']}) delta={row['net_delta']}"
         )
 
 # ── 场景3：多标的 ──
