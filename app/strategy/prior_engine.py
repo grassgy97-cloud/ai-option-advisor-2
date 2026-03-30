@@ -1,1 +1,0 @@
-# 已废弃：prior 逻辑已统一到 compiler.py 的 _build_prior_map()

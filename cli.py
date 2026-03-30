@@ -11,9 +11,9 @@ def main():
     user_text = sys.argv[1]
 
     resp = requests.post(
-        "http://127.0.0.1:8000/advisor/run",
+        "http://127.0.0.1:8005/advisor/run",
         json={"text": user_text},
-        timeout=30
+        timeout=120
     )
 
     print(json.dumps(resp.json(), ensure_ascii=False, indent=2))

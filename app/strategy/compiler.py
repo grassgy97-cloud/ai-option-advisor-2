@@ -173,8 +173,8 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         return StrategySpec(
             strategy_type="bull_call_spread", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="nearest",    delta_target=0.5),
-                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="same_expiry", delta_target=0.3),
+                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="nearest",     delta_target=0.5),
+                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="same_expiry",  delta_target=0.3),
             ],
             constraints=common_constraints, rationale="bull call spread", metadata={},
         )
@@ -183,8 +183,8 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         return StrategySpec(
             strategy_type="bear_call_spread", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest",    delta_target=0.3),
-                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="same_expiry", delta_target=0.15),
+                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest",     delta_target=0.3),
+                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="same_expiry",  delta_target=0.15),
             ],
             constraints=common_constraints, rationale="bear call spread", metadata={},
         )
@@ -193,8 +193,8 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         return StrategySpec(
             strategy_type="bull_put_spread", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="nearest",    delta_target=0.3),
-                StrategyLegSpec(action="BUY",  option_type="PUT", expiry_rule="same_expiry", delta_target=0.15),
+                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="nearest",      delta_target=0.3),
+                StrategyLegSpec(action="BUY",  option_type="PUT", expiry_rule="same_expiry",   delta_target=0.15),
             ],
             constraints=common_constraints, rationale="bull put spread", metadata={},
         )
@@ -203,8 +203,8 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         return StrategySpec(
             strategy_type="bear_put_spread", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="BUY",  option_type="PUT", expiry_rule="nearest",    delta_target=0.5),
-                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="same_expiry", delta_target=0.3),
+                StrategyLegSpec(action="BUY",  option_type="PUT", expiry_rule="nearest",      delta_target=0.5),
+                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="same_expiry",   delta_target=0.3),
             ],
             constraints=common_constraints, rationale="bear put spread", metadata={},
         )
@@ -214,10 +214,10 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         return StrategySpec(
             strategy_type="iron_condor", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest",    delta_target=0.3),
-                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="same_expiry", delta_target=0.15),
-                StrategyLegSpec(action="SELL", option_type="PUT",  expiry_rule="nearest",    delta_target=0.3),
-                StrategyLegSpec(action="BUY",  option_type="PUT",  expiry_rule="same_expiry", delta_target=0.15),
+                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest",     delta_target=0.3),
+                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="same_expiry",  delta_target=0.15),
+                StrategyLegSpec(action="SELL", option_type="PUT",  expiry_rule="nearest",     delta_target=0.3),
+                StrategyLegSpec(action="BUY",  option_type="PUT",  expiry_rule="same_expiry",  delta_target=0.15),
             ],
             constraints=common_constraints, rationale="iron condor", metadata={},
         )
@@ -226,17 +226,16 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         return StrategySpec(
             strategy_type="iron_fly", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest",    delta_target=0.5),
-                StrategyLegSpec(action="SELL", option_type="PUT",  expiry_rule="nearest",    delta_target=0.5),
-                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="same_expiry", delta_target=0.2),
-                StrategyLegSpec(action="BUY",  option_type="PUT",  expiry_rule="same_expiry", delta_target=0.2),
+                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest",     delta_target=0.5),
+                StrategyLegSpec(action="SELL", option_type="PUT",  expiry_rule="nearest",     delta_target=0.5),
+                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="same_expiry",  delta_target=0.2),
+                StrategyLegSpec(action="BUY",  option_type="PUT",  expiry_rule="same_expiry",  delta_target=0.2),
             ],
             constraints=common_constraints, rationale="iron fly", metadata={},
         )
 
-    # ===== 新策略：单腿买方 =====
+    # ===== 单腿买方 =====
 
-    # long_call — delta_target 0.30 → 0.50，rationale 更新
     if strategy_type == "long_call":
         return StrategySpec(
             strategy_type="long_call", underlying_id=underlying_id,
@@ -255,7 +254,6 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
             metadata={"selection_mode": "long_single"},
         )
 
-    # long_put — 同上
     if strategy_type == "long_put":
         return StrategySpec(
             strategy_type="long_put", underlying_id=underlying_id,
@@ -274,7 +272,7 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
             metadata={"selection_mode": "long_single"},
         )
 
-    # ===== 新策略：单腿卖方 =====
+    # ===== 单腿卖方 =====
 
     if strategy_type == "naked_call":
         return StrategySpec(
@@ -312,7 +310,6 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
             metadata={"selection_mode": "naked_single"},
         )
 
-    # compiler.py — covered_call spec，dte 改成 60-180
     if strategy_type == "covered_call":
         return StrategySpec(
             strategy_type="covered_call", underlying_id=underlying_id,
@@ -321,7 +318,7 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
                     action="SELL", option_type="CALL", expiry_rule="nearest",
                     strike=None, delta_target=0.20, quantity=1,
                     leg_constraints=LegConstraint(
-                        dte_min=60, dte_max=180,  # 2-6个月
+                        dte_min=60, dte_max=180,        # 2-6个月
                         max_rel_spread=0.03, min_quote_size=1,
                     ),
                 ),
@@ -379,21 +376,24 @@ def compile_intent_to_strategies(
     # ===== market_view 驱动 =====
     if intent.market_view == "bullish":
         candidates += [
-            ("bull_call_spread", 0.9),
-            ("bull_put_spread",  0.85),
-            ("naked_put",        0.65),
+            ("diagonal_call",    0.95),   # 看多首选，方向性敞口
+            ("bull_call_spread", 0.70),
+            ("bull_put_spread",  0.65),
+            ("naked_put",        0.50),   # 底部确认时更适合，纯看多不是首选
         ]
     elif intent.market_view == "bearish":
         candidates += [
             ("bear_call_spread", 0.9),
             ("bear_put_spread",  0.85),
             ("naked_call",       0.65),
+            ("long_put",         0.70),
         ]
     else:  # neutral
         candidates += [
             ("iron_condor",  0.85),
             ("iron_fly",     0.80),
             ("covered_call", 0.60),
+            ("naked_put",    0.65),   # neutral偏多时合适
         ]
 
     # ===== prefer_multi_leg 驱动 =====
@@ -411,11 +411,14 @@ def compile_intent_to_strategies(
         if s not in best_map or w > best_map[s]:
             best_map[s] = w
 
-    # ===== call/put_iv_rich 时强制压低 iron prior（不受 market_view 影响）=====
+    # ===== call/put_iv_rich 时强制压低 iron 和 covered_call prior =====
     if intent.vol_view in ("call_iv_rich", "put_iv_rich"):
         for k in ("iron_condor", "iron_fly"):
             if k in best_map:
                 best_map[k] = min(best_map[k], 0.25)
+        # covered_call 在认购/认沽偏贵时降权，避免排太高
+        if "covered_call" in best_map:
+            best_map["covered_call"] = min(best_map["covered_call"], 0.45)
 
     # ===== IV percentile 驱动调整 =====
     if iv_pct is not None:
@@ -457,6 +460,11 @@ def compile_intent_to_strategies(
     # ===== banned_strategies 过滤 =====
     for banned in (intent.banned_strategies or []):
         best_map.pop(banned, None)
+
+    # ===== defined_risk_only 过滤（裸卖是无限风险，需剔除）=====
+    if intent.defined_risk_only:
+        for k in ("naked_call", "naked_put"):
+            best_map.pop(k, None)
 
     # ===== 构建 StrategySpec 列表 =====
     specs: List[StrategySpec] = []

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+
+
 from typing import Dict, List, Tuple
 
 from app.models.schemas import ResolvedStrategy
@@ -9,6 +12,8 @@ from app.strategy.greeks_monitor import compute_strategy_net_greeks
 # ============================================================
 # 通用辅助
 # ============================================================
+
+logger = logging.getLogger(__name__)
 
 def _avg_rel_spread(strategy: ResolvedStrategy) -> float:
     spreads = []

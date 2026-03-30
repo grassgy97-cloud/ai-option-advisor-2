@@ -2,7 +2,7 @@ from app.core.db import engine
 from app.strategy.advisor_service_v2 import run_advisor
 from app.strategy.iv_percentile import build_iv_percentile_report
 from app.strategy.briefing import build_briefing
-
+'''
 # ── 场景1：近月认购偏贵，单标的 ──
 print("=" * 60)
 print("【场景1】近月认购偏贵，510300")
@@ -42,3 +42,21 @@ print("=" * 60)
 print("【IV percentile】510300")
 iv_report = build_iv_percentile_report(engine, "510300")
 print(iv_report)
+'''
+# 在 test.py 里加这几个场景
+# 场景4：IV极低，应该激活long_call/long_put
+res4 = run_advisor(engine, "现在波动率很低，想买单边", "510300")
+print(f"vol_view: {res4.parsed_intent.vol_view}")
+for s in (res4.resolved_candidates or [])[:5]:
+    print(f"  {s.underlying_id} {s.strategy_type:<20} score={s.score:.4f}")
+
+# 场景5：明确看多，应该推bull_call_spread/bull_put_spread靠前
+res5 = run_advisor(engine, "我觉得300ETF近期会涨，想做方向性策略", "510300")
+print(f"market_view: {res5.parsed_intent.market_view}")
+for s in (res5.resolved_candidates or [])[:5]:
+    print(f"  {s.underlying_id} {s.strategy_type:<20} score={s.score:.4f}")
+
+# 场景6：covered_call专项，确认prior压制后排序
+res6 = run_advisor(engine, "我持有300ETF现货，想做备兑增强收益", "510300")
+for s in (res6.resolved_candidates or [])[:5]:
+    print(f"  {s.underlying_id} {s.strategy_type:<20} score={s.score:.4f}")

@@ -226,7 +226,7 @@ def print_recommendations(underlying_id: str, hands: int, name: str, candidates:
     for i, c in enumerate(top, 1):
         total_credit    = c["mid"] * total_shares
         total_credit_lp = c["limit_price"] * total_shares
-        total_fee       = FEE_PER_SHARE * total_shares  # 4元/手 × 手数
+        total_fee       = FEE_PER_SHARE * total_shares * hands  # 每手一次手续费
 
         print(f"  【推荐{i}】{'★' * max(1, round(c['score']))}  score={c['score']}")
         print(f"    合约：{c['contract_id']}")
