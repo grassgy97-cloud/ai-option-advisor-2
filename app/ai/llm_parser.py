@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 import anthropic
 from app.core.config import ANTHROPIC_API_KEY
 
@@ -40,7 +41,9 @@ market_view：
 - 看多/看涨/偏多/后市乐观/bullish → "bullish"
 - 看空/看跌/偏空/后市悲观/bearish → "bearish"
 - 震荡/中性/没有方向/neutral → "neutral"
-- 未明确 → "neutral"
+- 未明确 → 结合market_context的trend字段判断：
+    uptrend → "bullish"，downtrend → "bearish"，sideways → "neutral"
+- 用户意图优先，market_context作为辅助参考，不强制覆盖用户判断
 
 vol_view：
 - 认购贵/call贵/认购iv高/近月认购偏贵 → "call_iv_rich"
@@ -48,7 +51,10 @@ vol_view：
 - 近月贵/近月iv高/前端高/term_front → "term_front_high"
 - 远月贵/远月iv高/后端高/term_back → "term_back_high"
 - 整体iv高/波动率高/iv高 → "iv_high"
-- 未明确 → "none"
+- 未明确时结合market_context：
+    put_call_skew > 0.005 → "put_iv_rich"
+    put_call_skew < -0.005 → "call_iv_rich"
+    否则 → "none"
 
 risk_preference：
 - 低风险/保守/风险可控 → "low"
@@ -111,6 +117,11 @@ Greek映射规则：
   - 买方思维/时间不够/需要快速兑现 → negative
   - 未提及 → 不输出
 
+结合market_context补充greeks判断（仅在用户未明确表达时参考）：
+- trend=downtrend且用户未说方向 → delta加negative，strength=0.4
+- trend=uptrend且用户未说方向 → delta加positive，strength=0.4
+- hv20偏高（>0.25）且用户未说波动预期 → gamma加positive，strength=0.3
+
 示例：
 - "双向都可能动，但下行空间更大" →
   {"gamma": {"sign": "positive", "strength": 0.8}, "delta": {"sign": "negative", "strength": 0.3}}
@@ -128,11 +139,7 @@ price_levels：
 - "resistance"：压力位/上方阻力（例如"上方8%有压力" → 0.08）
 - "target"：目标位/预期运行区间中点（例如"预计涨5%" → 0.05）
 
-示例：
-- "下跌空间有限，-10%有支撑" → {"support": -0.10}
-- "上方5%有压力，下方12%有保底" → {"resistance": 0.05, "support": -0.12}
-- "预计下跌8%左右" → {"target": -0.08}
-- 未提及任何价位 → {}
+⚠️ 价位必须是相对百分比（如-0.08、0.05），不接受绝对价格。
 
 asymmetry：
 描述用户预期的涨跌空间是否对称：
@@ -142,14 +149,33 @@ asymmetry：
 - 未明确 → null"""
 
 
-def parse_with_llm(text: str) -> dict:
-    """调用 Claude API 解析自然语言意图，返回结构化dict"""
+def parse_with_llm(
+    text: str,
+    market_context: Optional[dict] = None,
+) -> dict:
+    """
+    调用 Claude API 解析自然语言意图，返回结构化dict。
+
+    market_context: build_market_context_multi()的输出，格式为 {uid: ctx_dict}。
+    拼入user message供LLM参考，用户意图仍然优先。
+    """
+    user_message = text
+
+    if market_context:
+        ctx_lines = ["【当前市场背景（供参考，用户意图优先）】"]
+        for uid, ctx in market_context.items():
+            summary = ctx.get("summary", "")
+            if summary:
+                ctx_lines.append(f"• {summary}")
+        if len(ctx_lines) > 1:
+            user_message = "\n".join(ctx_lines) + "\n\n【用户输入】\n" + text
+
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=768,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": text}]
+            messages=[{"role": "user", "content": user_message}]
         )
         raw = response.content[0].text.strip()
         raw = raw.replace("```json", "").replace("```", "").strip()

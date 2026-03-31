@@ -435,6 +435,36 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
 
 
 # ==============================
+# 辅助：term_slope → calendar/diagonal动态prior
+# ==============================
+
+def _calendar_prior_from_term_slope(term_slope: Optional[float]) -> float:
+    """
+    根据期限结构斜率（近月IV - 远月IV）动态计算calendar/diagonal的prior。
+    近月比远月贵越多→prior越高（上限0.95，5个vol点饱和）。
+    近月比远月便宜→prior越低（下限0.15，强烈不推）。
+    数据缺失时返回中性值0.55。
+    """
+    if term_slope is None:
+        return 0.55
+
+    if term_slope >= 0.05:
+        return 0.95
+    elif term_slope >= 0.03:
+        return 0.85
+    elif term_slope >= 0.01:
+        return 0.75
+    elif term_slope >= 0.0:
+        return 0.60
+    elif term_slope >= -0.01:
+        return 0.45
+    elif term_slope >= -0.02:
+        return 0.30
+    else:
+        return 0.15
+
+
+# ==============================
 # main compiler
 # ==============================
 
@@ -444,22 +474,37 @@ def compile_intent_to_strategies(
 ) -> List[StrategySpec]:
     candidates: List[tuple[str, float]] = []
 
+    # ===== 取market_context里的term_slope，计算calendar动态prior =====
+    ctx_data = getattr(intent, "market_context_data", {}) or {}
+    uid_ctx = ctx_data.get(intent.underlying_id) or (
+        next(iter(ctx_data.values())) if ctx_data else {}
+    )
+    term_slope_call = uid_ctx.get("term_slope_call")
+    term_slope_put  = uid_ctx.get("term_slope_put")
+
+    cal_prior_call = _calendar_prior_from_term_slope(term_slope_call)
+    cal_prior_put  = _calendar_prior_from_term_slope(term_slope_put)
+
+    # diagonal比calendar多一个方向性因子，prior略高（+0.05，上限0.95）
+    diag_prior_call = min(0.95, cal_prior_call + 0.05)
+    diag_prior_put  = min(0.95, cal_prior_put  + 0.05)
+
     # ===== vol_view 驱动 =====
     if intent.vol_view == "call_iv_rich":
         candidates += [
-            ("call_calendar",    1.0),
-            ("diagonal_call",    0.9),
-            ("diagonal_put",     0.85),
-            ("put_calendar",     0.90),
+            ("call_calendar",    cal_prior_call),
+            ("diagonal_call",    diag_prior_call),
+            ("diagonal_put",     max(0.15, diag_prior_put - 0.05)),
+            ("put_calendar",     max(0.15, cal_prior_put  - 0.05)),
             ("bear_call_spread", 0.75),
             ("bull_call_spread", 0.7),
         ]
     elif intent.vol_view == "put_iv_rich":
         candidates += [
-            ("put_calendar",    1.0),
-            ("diagonal_put",    0.9),
-            ("diagonal_call",   0.85),
-            ("call_calendar",   0.90),
+            ("put_calendar",    cal_prior_put),
+            ("diagonal_put",    diag_prior_put),
+            ("diagonal_call",   max(0.15, diag_prior_call - 0.05)),
+            ("call_calendar",   max(0.15, cal_prior_call  - 0.05)),
             ("bear_put_spread", 0.75),
             ("bull_put_spread", 0.7),
         ]
@@ -467,8 +512,8 @@ def compile_intent_to_strategies(
         candidates += [
             ("iron_condor",      0.80),
             ("iron_fly",         0.75),
-            ("call_calendar",    0.75),
-            ("put_calendar",     0.75),
+            ("call_calendar",    min(0.75, cal_prior_call)),
+            ("put_calendar",     min(0.75, cal_prior_put)),
             ("bear_call_spread", 0.70),
             ("bull_put_spread",  0.70),
             ("naked_call",       0.70),
@@ -479,7 +524,7 @@ def compile_intent_to_strategies(
     # ===== market_view 驱动 =====
     if intent.market_view == "bullish":
         candidates += [
-            ("diagonal_call",    0.95),
+            ("diagonal_call",    min(0.95, diag_prior_call + 0.10)),
             ("bull_call_spread", 0.70),
             ("bull_put_spread",  0.65),
             ("naked_put",        0.50),
@@ -504,13 +549,13 @@ def compile_intent_to_strategies(
         candidates += [
             ("bear_put_spread", 0.80),
             ("long_put",        0.65),
-            ("diagonal_put",    0.75),
+            ("diagonal_put",    min(0.95, diag_prior_put + 0.05)),
         ]
     elif intent.asymmetry == "upside":
         candidates += [
             ("bull_call_spread", 0.80),
             ("long_call",        0.65),
-            ("diagonal_call",    0.75),
+            ("diagonal_call",    min(0.95, diag_prior_call + 0.05)),
         ]
     elif intent.asymmetry == "symmetric":
         candidates += [
@@ -521,8 +566,8 @@ def compile_intent_to_strategies(
     # ===== prefer_multi_leg 驱动 =====
     if intent.prefer_multi_leg:
         candidates += [
-            ("diagonal_call", 0.80),
-            ("diagonal_put",  0.80),
+            ("diagonal_call", min(0.85, diag_prior_call)),
+            ("diagonal_put",  min(0.85, diag_prior_put)),
         ]
 
     # ===== best_map：各策略取最高prior =====
@@ -531,14 +576,15 @@ def compile_intent_to_strategies(
         if s not in best_map or w > best_map[s]:
             best_map[s] = w
 
-    # ===== call/put_iv_rich 时强制压低 iron、covered_call、买方debit spread =====
+    # ===== call/put_iv_rich 时压低 iron、买方debit spread =====
     if intent.vol_view in ("call_iv_rich", "put_iv_rich"):
         for k in ("iron_condor", "iron_fly"):
             if k in best_map:
-                best_map[k] = min(best_map[k], 0.25)
-        if "covered_call" in best_map:
-            best_map["covered_call"] = min(best_map["covered_call"], 0.45)
+                best_map[k] = min(best_map[k], 0.50)  # 有买方腿成本上升，但不完全压制
+        # covered_call卖的是call，只在call_iv_rich时压制
         if intent.vol_view == "call_iv_rich":
+            if "covered_call" in best_map:
+                best_map["covered_call"] = min(best_map["covered_call"], 0.45)
             if "bull_call_spread" in best_map:
                 best_map["bull_call_spread"] = min(best_map["bull_call_spread"], 0.40)
         if intent.vol_view == "put_iv_rich":
@@ -576,6 +622,73 @@ def compile_intent_to_strategies(
             for k in ("long_call", "long_put"):
                 if k in best_map:
                     best_map[k] = round(best_map[k] * 0.5, 3)
+
+    # ===== put/call skew 驱动调整 =====
+    skew = uid_ctx.get("put_call_skew") or 0.0
+
+    if skew > 0.03:
+        # put偏贵：put calendar/diagonal加权（但需要put近月确实比远月贵才有意义）
+        for k in ("put_calendar", "diagonal_put"):
+            if k in best_map:
+                best_map[k] = min(1.0, round(best_map[k] * 1.1, 3))
+        if "naked_put" in best_map:
+            best_map["naked_put"] = round(best_map["naked_put"] * 0.9, 3)
+        if "bear_put_spread" in best_map:
+            best_map["bear_put_spread"] = min(1.0, round(best_map["bear_put_spread"] * 1.05, 3))
+
+    elif skew < -0.03:
+        # call偏贵：call calendar/diagonal/covered_call加权
+        for k in ("call_calendar", "diagonal_call", "covered_call"):
+            if k in best_map:
+                best_map[k] = min(1.0, round(best_map[k] * 1.1, 3))
+        if "naked_call" in best_map:
+            best_map["naked_call"] = round(best_map["naked_call"] * 0.9, 3)
+        if "bull_call_spread" in best_map:
+            best_map["bull_call_spread"] = min(1.0, round(best_map["bull_call_spread"] * 1.05, 3))
+
+    # ===== Greeks意图驱动prior调整 =====
+    # 在iv_pct/skew调整之后、allowed_strategies提权之前
+    # 用户明确表达的Greeks偏好直接影响prior，不只靠ranker层微调
+
+    vega_pref  = intent.greeks_preference.get("vega", {})
+    gamma_pref = intent.greeks_preference.get("gamma", {})
+
+    vega_sign     = vega_pref.get("sign")
+    vega_strength = float(vega_pref.get("strength", 0))
+    gamma_sign     = gamma_pref.get("sign")
+    gamma_strength = float(gamma_pref.get("strength", 0))
+
+    if vega_sign == "positive" and vega_strength > 0.5:
+        # 用户预期IV上升：压制short vega策略，激活long方向
+        for k in ("naked_call", "naked_put", "covered_call",
+                  "bear_call_spread", "bull_put_spread",
+                  "iron_condor", "iron_fly"):
+            if k in best_map:
+                best_map[k] = round(best_map[k] * 0.5, 3)
+        best_map["long_put"]  = max(best_map.get("long_put",  0), 0.80)
+        best_map["long_call"] = max(best_map.get("long_call", 0), 0.70)
+
+    elif vega_sign == "negative" and vega_strength > 0.5:
+        # 用户预期IV下降：加权short vega策略
+        for k in ("naked_call", "naked_put", "covered_call",
+                  "iron_condor", "iron_fly"):
+            if k in best_map:
+                best_map[k] = min(1.0, round(best_map[k] * 1.2, 3))
+
+    if gamma_sign == "positive" and gamma_strength > 0.5:
+        # 用户预期大幅波动：压制short gamma策略
+        for k in ("naked_call", "naked_put", "covered_call",
+                  "iron_condor", "iron_fly"):
+            if k in best_map:
+                best_map[k] = round(best_map[k] * 0.6, 3)
+        best_map["long_put"]  = max(best_map.get("long_put",  0), 0.75)
+        best_map["long_call"] = max(best_map.get("long_call", 0), 0.75)
+
+    elif gamma_sign == "negative" and gamma_strength > 0.5:
+        # 用户预期窄幅震荡：加权short gamma策略
+        for k in ("iron_condor", "iron_fly", "covered_call"):
+            if k in best_map:
+                best_map[k] = min(1.0, round(best_map[k] * 1.15, 3))
 
     # ===== allowed_strategies 提权 =====
     if intent.allowed_strategies:

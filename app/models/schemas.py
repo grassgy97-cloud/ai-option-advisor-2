@@ -63,6 +63,9 @@ class IntentSpec(BaseModel):
     # "upside" | "downside" | "symmetric" | None
     asymmetry: Optional[str] = None
 
+    # 机器计算的市场背景，供compiler/briefing使用
+    market_context_data: Dict[str, Any] = Field(default_factory=dict)
+
     @property
     def effective_underlying_ids(self) -> List[str]:
         """返回实际要跑的标的列表"""

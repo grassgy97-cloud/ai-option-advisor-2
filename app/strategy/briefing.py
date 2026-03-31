@@ -7,13 +7,34 @@ from typing import Any, Dict, List, Optional
 
 _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+
+_PROFIT_CONDITIONS = {
+    "call_calendar":   "近月call IV收敛+标的小幅波动",
+    "put_calendar":    "近月put IV收敛+标的小幅波动",
+    "diagonal_call":   "近月call衰减+标的温和上涨",
+    "diagonal_put":    "近月put衰减+标的温和下跌",
+    "bear_call_spread":"标的到期低于short call strike",
+    "bull_put_spread": "标的到期高于short put strike",
+    "bull_call_spread":"标的到期高于long call strike",
+    "bear_put_spread": "标的到期低于long put strike",
+    "iron_condor":     "标的到期在两个short strike之间",
+    "iron_fly":        "标的到期接近ATM strike",
+    "long_call":       "标的上涨+IV上升",
+    "long_put":        "标的下跌+IV上升",
+    "naked_call":      "标的不涨或下跌，call到期虚值",
+    "naked_put":       "标的不跌或上涨，put到期虚值",
+    "covered_call":    "标的横盘或温和上涨，call到期虚值",
+}
+
 def build_briefing(
-    ranked: List[ResolvedStrategy],
+    ranked: List,
     intent_text: str,
     top_n: int = 5,
+    market_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     生成推荐简报：表格 + LLM 自然语言解释。
+    market_context: {uid: ctx_dict}，用于在简报里体现机器判断。
     """
     top = ranked[:top_n]
 
@@ -24,15 +45,12 @@ def build_briefing(
         iv_pct = gr.get("iv_percentile", {})
         ng = gr.get("net_greeks", {})
 
-        # 建仓成本
         if s.net_debit is not None:
             cost_str = f"付权利金 {s.net_debit:.4f}"
         elif s.net_credit is not None:
             cost_str = f"收权利金 {s.net_credit:.4f}"
         else:
             cost_str = "—"
-
-        # 腿信息
 
         legs_str = " / ".join(
             f"{'卖' if l.action == 'SELL' else '买'}"
@@ -45,23 +63,33 @@ def build_briefing(
         )
 
         table.append({
-            "rank":          i,
-            "underlying":    s.underlying_id,
-            "strategy":      s.strategy_type,
-            "score":         round(s.score, 3),
-            "cost":          cost_str,
-            "legs":          legs_str,
-            "net_delta":     round(ng.get("net_delta") or 0, 3),
-            "net_vega":      round(ng.get("net_vega") or 0, 4),
-            "net_theta":     round(ng.get("net_theta") or 0, 4),
-            "iv_label":      iv_pct.get("label", "—"),
-            "iv_pct":        iv_pct.get("composite_percentile", "—"),
-            "risk_flags":    gr.get("risk_flags", []),
+            "rank":             i,
+            "underlying":       s.underlying_id,
+            "strategy":         s.strategy_type,
+            "score":            round(s.score, 3),
+            "cost":             cost_str,
+            "legs":             legs_str,
+            "net_delta":        round(ng.get("net_delta") or 0, 3),
+            "net_vega":         round(ng.get("net_vega") or 0, 4),
+            "net_theta":        round(ng.get("net_theta") or 0, 4),
+            "iv_label":         iv_pct.get("label", "—"),
+            "iv_pct":           iv_pct.get("composite_percentile", "—"),
+            "risk_flags":       gr.get("risk_flags", []),
+            "profit_condition": _PROFIT_CONDITIONS.get(s.strategy_type, "—"),
         })
 
-    # ── LLM 简报 ──
-    # 构建给 LLM 的紧凑上下文
-    ctx_lines = [f"用户输入：{intent_text}", "推荐策略（按评分排序）："]
+    # ── 构建LLM上下文 ──
+    ctx_lines = [f"用户输入：{intent_text}"]
+
+    # 加入market_context摘要
+    if market_context:
+        ctx_lines.append("\n当前市场背景：")
+        for uid, ctx in market_context.items():
+            summary = ctx.get("summary", "")
+            if summary:
+                ctx_lines.append(f"• {summary}")
+
+    ctx_lines.append("\n推荐策略（按评分排序）：")
     for row in table:
         ctx_lines.append(
             f"{row['rank']}. {row['underlying']} {row['strategy']} "
@@ -74,16 +102,17 @@ def build_briefing(
     ctx = "\n".join(ctx_lines)
 
     system = """你是一个A股ETF期权交易助手，面向有经验的交易者。
-用简洁专业的语言（不超过200字）解释推荐理由，包含：
-1. 当前市场环境判断（一句话）
+用简洁专业的语言（不超过250字）解释推荐理由，包含：
+1. 当前市场环境判断（结合技术面和期权市场数据，一两句）
 2. 首选策略的核心逻辑
-3. 建仓后什么情况下考虑平仓（触发条件，一两句）
+3. 机器判断与用户判断若有分歧，简要提示（如"技术面偏空但您判断偏多，注意风险"）
+4. 建仓后什么情况下考虑平仓（触发条件，一两句）
 不需要科普基础知识，直接讲重点。输出中文。"""
 
     try:
         resp = _client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=400,
+            max_tokens=500,
             system=system,
             messages=[{"role": "user", "content": ctx}],
         )
@@ -93,6 +122,6 @@ def build_briefing(
         narrative = "（简报生成失败）"
 
     return {
-        "table": table,
+        "table":     table,
         "narrative": narrative,
     }

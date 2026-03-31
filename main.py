@@ -211,7 +211,8 @@ HTML_PAGE = """<!DOCTYPE html>
   .legs-cell  { font-size: 11px; color: #8892b0; max-width: 300px; line-height: 1.6; }
   .flag       { display: inline-block; background: #2d1f1f; color: #f87171;
                 font-size: 10px; padding: 1px 6px; border-radius: 4px; margin: 1px; }
-  .iv-label   { font-size: 11px; color: #a0aec0; }
+  .score-label { font-size: 10px; letter-spacing: 1px; }
+  .profit-cond { font-size: 11px; color: #6ee7b7; line-height: 1.5; }
 
   /* Greeks 小表 */
   .greeks {
@@ -301,7 +302,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <div class="table-wrap"><table id="result-table" style="display:none">
   <thead><tr>
     <th>#</th><th>标的</th><th>策略</th><th>评分</th>
-    <th>成本/收入</th><th>Greeks</th><th>IV</th><th>腿</th><th>风险</th>
+    <th>成本/收入</th><th>Greeks</th><th>IV分位</th><th>腿</th><th>盈利条件</th><th>风险</th>
   </tr></thead>
   <tbody id="result-body"></tbody>
 </table></div>
@@ -424,7 +425,6 @@ function renderResult(data) {
   const intentBar = document.getElementById('intent-bar');
   intentBar.style.display = 'flex';
 
-  // 新字段展示
   const gp = intent.greeks_preference || {};
   const gpStr = Object.entries(gp).map(([k, v]) =>
     `${k}:${v.sign === 'positive' ? '↑' : v.sign === 'negative' ? '↓' : '~'}(${v.strength})`
@@ -457,22 +457,31 @@ function renderResult(data) {
 
   const tbody = document.getElementById('result-body');
   tbody.innerHTML = rows.map((r, i) => {
-    const scoreClass = r.score >= 0.8 ? 'score-high' : r.score >= 0.6 ? 'score-mid' : 'score-low';
+    const scoreClass = r.score >= 0.80 ? 'score-high'
+                     : r.score >= 0.65 ? 'score-mid'
+                     : 'score-low';
+    const scoreLabel = r.score >= 0.80 ? '⭐⭐⭐'
+                     : r.score >= 0.65 ? '⭐⭐'
+                     : r.score >= 0.50 ? '⭐'
+                     : r.score >= 0.35 ? '△' : '✗';
     const flags = (r.risk_flags || []).map(f => `<span class="flag">${f}</span>`).join('');
     const greeks = `<div class="greeks">
       <span>Δ=${r.net_delta}</span>
       <span>V=${r.net_vega}</span>
       <span>θ=${r.net_theta}</span>
     </div>`;
+    const ivPctNum = typeof r.iv_pct === 'number' ? (r.iv_pct * 100).toFixed(0) + '%' : r.iv_pct;
+    const profit = r.profit_condition ? `<span class="profit-cond">${r.profit_condition}</span>` : '';
     return `<tr class="${i===0?'rank-1':''}">
       <td>${r.rank}</td>
       <td>${r.underlying}</td>
       <td><b>${r.strategy}</b></td>
-      <td class="${scoreClass}">${r.score}</td>
+      <td class="${scoreClass}">${r.score}<br><span class="score-label">${scoreLabel}</span></td>
       <td>${r.cost}</td>
       <td>${greeks}</td>
-      <td><span class="iv-label">${r.iv_label}(${(r.iv_pct*100).toFixed(0)}%)</span></td>
+      <td><span class="iv-label">${r.iv_label}(${ivPctNum})</span></td>
       <td class="legs-cell">${(r.legs||'').replace(/ \/ /g,'<br>')}</td>
+      <td>${profit}</td>
       <td>${flags}</td>
     </tr>`;
   }).join('');

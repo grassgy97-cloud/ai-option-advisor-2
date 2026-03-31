@@ -126,6 +126,17 @@ def _extract_prior_weight(strategy: ResolvedStrategy) -> float:
 def _extract_iv_pct(strategy: ResolvedStrategy) -> float:
     if not strategy.metadata:
         return 0.5
+    # 优先从greeks_report里取（这是实际存放的位置）
+    gr = strategy.metadata.get("greeks_report", {})
+    iv_pct_data = gr.get("iv_percentile", {})
+    if isinstance(iv_pct_data, dict):
+        v = iv_pct_data.get("composite_percentile")
+        if v is not None:
+            try:
+                return float(v)
+            except Exception:
+                pass
+    # 兼容旧路径
     if "iv_pct" in strategy.metadata:
         try:
             return float(strategy.metadata.get("iv_pct", 0.5) or 0.5)
@@ -238,7 +249,7 @@ def _calc_greeks_intent_adj(
     intent_score = weighted_match / total_weight
     # intent_score范围：[-0.5, 1.0]
     # 映射到adj：[-0.5→0.75, 1.0→1.0]
-    greeks_adj = 0.75 + 0.25 * max(-1.0, intent_score)
+    greeks_adj = 0.70 + 0.30 * max(-1.0, intent_score)
     return round(max(0.75, greeks_adj), 4)
 
 
@@ -640,24 +651,42 @@ def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
             else:
                 delta_score = 0.3
 
+
     elif strategy.strategy_type in ("long_call", "long_put"):
+
         if leg_strike_forced or abs_delta is None:
             delta_score = 0.7
-        elif 0.35 <= abs_delta <= 0.50:
-            delta_score = 1.0
-        elif 0.50 < abs_delta <= 0.65:
-            delta_score = 0.85
-        elif 0.25 <= abs_delta < 0.35:
-            delta_score = 0.75
-        elif 0.65 < abs_delta <= 0.75:
-            delta_score = 0.65
-        elif abs_delta < 0.25:
-            delta_score = 0.5
         else:
-            delta_score = 0.5
+            # 连续递减：峰值在0.40-0.50，两侧线性衰减
+            # 0.40-0.50 → 1.0
+            # 0.35 → 0.90，0.30 → 0.75，0.25 → 0.55，<0.25 → 0.4
+            # 0.55 → 0.90，0.60 → 0.80，0.65 → 0.70，0.70 → 0.55，>0.70 → 0.4
+            d = abs_delta
+            if 0.40 <= d <= 0.50:
+                delta_score = 1.0
+            elif 0.35 <= d < 0.40:
+                delta_score = 0.90 + (d - 0.35) / 0.05 * 0.10
+            elif 0.30 <= d < 0.35:
+                delta_score = 0.75 + (d - 0.30) / 0.05 * 0.15
+            elif 0.25 <= d < 0.30:
+                delta_score = 0.55 + (d - 0.25) / 0.05 * 0.20
+            elif d < 0.25:
+                delta_score = max(0.3, 0.55 - (0.25 - d) / 0.05 * 0.10)
+            elif 0.50 < d <= 0.55:
+                delta_score = 0.90 + (0.55 - d) / 0.05 * 0.10
+            elif 0.55 < d <= 0.60:
+                delta_score = 0.80 + (0.60 - d) / 0.05 * 0.10
+            elif 0.60 < d <= 0.65:
+                delta_score = 0.70 + (0.65 - d) / 0.05 * 0.10
+            elif 0.65 < d <= 0.70:
+                delta_score = 0.55 + (0.70 - d) / 0.05 * 0.15
+            else:
+                delta_score = max(0.3, 0.55 - (d - 0.70) / 0.05 * 0.10)
 
-        raw_vega   = leg.vega if leg.vega is not None else 0.0
-        vega_score = min(1.0, raw_vega / 0.008)
+        raw_vega = leg.vega if leg.vega is not None else 0.0
+        spot = strategy.spot_price or 1.0
+        vega_normalized = raw_vega / spot
+        vega_score = min(1.0, vega_normalized / 0.0018)
 
         iv_pct   = _extract_iv_pct(strategy)
         iv_score = 1.0 - iv_pct

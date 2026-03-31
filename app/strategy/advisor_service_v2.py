@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.engine import Engine
 from app.ai.llm_parser import parse_with_llm
@@ -28,9 +28,104 @@ UNDERLYING_KEYWORDS = {
     "159922": ["159922", "中证500深", "嘉实500", "嘉实中证500"],
 }
 
+ALL_UNDERLYING_IDS = [
+    "510300", "510050", "510500",
+    "588000", "588080",
+    "159915", "159901", "159919", "159922",
+]
 
-def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec:
-    result = parse_with_llm(text)
+
+# ============================================================
+# 二八合成：机器market_context信号 + 用户Greeks意图
+# ============================================================
+
+def _merge_greeks_with_context(
+    greeks_preference: dict,
+    market_context: dict,
+    user_weight: float = 0.8,
+    machine_weight: float = 0.2,
+) -> dict:
+    """
+    把机器从market_context推断的Greeks信号，以二八权重合并进用户意图。
+
+    规则：
+    - 用户已提及的Greek：方向一致则strength增强，方向相反则strength削弱
+    - 用户未提及的Greek：机器信号以machine_weight直接写入
+    - 多标的时取强度最大的机器信号
+    """
+    if not market_context:
+        return greeks_preference
+
+    machine_signals: Dict[str, Dict[str, Any]] = {}
+
+    for uid, ctx in market_context.items():
+        trend = ctx.get("trend")
+        hv20 = ctx.get("hv20") or 0.0
+        skew = ctx.get("put_call_skew") or 0.0
+
+        # trend → delta信号
+        if trend == "downtrend":
+            sig = {"sign": "negative", "strength": 0.4}
+        elif trend == "uptrend":
+            sig = {"sign": "positive", "strength": 0.4}
+        else:
+            sig = None
+
+        if sig:
+            existing = machine_signals.get("delta")
+            if existing is None or sig["strength"] > existing["strength"]:
+                machine_signals["delta"] = sig
+
+        # hv20偏高 → gamma偏好正
+        if hv20 > 0.25:
+            sig = {"sign": "positive", "strength": 0.3}
+            existing = machine_signals.get("gamma")
+            if existing is None or sig["strength"] > existing["strength"]:
+                machine_signals["gamma"] = sig
+
+        # skew偏大 → theta卖方信号
+        if abs(skew) > 0.03:
+            sig = {"sign": "positive", "strength": 0.25}
+            existing = machine_signals.get("theta")
+            if existing is None or sig["strength"] > existing["strength"]:
+                machine_signals["theta"] = sig
+
+    merged = dict(greeks_preference)
+
+    for greek, m_pref in machine_signals.items():
+        m_sign = m_pref["sign"]
+        m_strength = m_pref["strength"]
+
+        if greek in merged:
+            u_pref = merged[greek]
+            u_sign = u_pref["sign"]
+            u_strength = u_pref["strength"]
+
+            if u_sign == m_sign:
+                new_strength = min(1.0, u_strength * user_weight + m_strength * machine_weight)
+            else:
+                new_strength = max(0.0, u_strength * user_weight - m_strength * machine_weight)
+
+            merged[greek] = {"sign": u_sign, "strength": round(new_strength, 3)}
+        else:
+            merged[greek] = {
+                "sign": m_sign,
+                "strength": round(m_strength * machine_weight, 3),
+            }
+
+    return merged
+
+
+# ============================================================
+# 意图解析
+# ============================================================
+
+def parse_text_to_intent(
+    text: str,
+    underlying_id: str = "510300",
+    market_context: Optional[dict] = None,
+) -> IntentSpec:
+    result = parse_with_llm(text, market_context=market_context)
 
     if result is None:
         print("[parse_text_to_intent] LLM failed, falling back to rule parser")
@@ -40,12 +135,10 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
     if not underlying_ids:
         underlying_ids = [underlying_id]
 
-    # preferred_strategies → allowed_strategies
     preferred = result.get("preferred_strategies", [])
     allowed_strategies = preferred if preferred else None
 
-    # ===== 新增：greeks_preference 校验和清洗 =====
-    # 只保留格式合法的字段，忽略LLM可能输出的脏数据
+    # greeks_preference 校验和清洗
     raw_greeks = result.get("greeks_preference", {})
     greeks_preference = {}
     if isinstance(raw_greeks, dict):
@@ -64,7 +157,14 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
                 continue
             greeks_preference[greek] = {"sign": sign, "strength": strength}
 
-    # ===== 新增：price_levels 校验和清洗 =====
+    # 二八合成：机器market_context信号 + 用户Greeks意图
+    if market_context:
+        greeks_preference = _merge_greeks_with_context(
+            greeks_preference, market_context,
+            user_weight=0.85, machine_weight=0.15,
+        )
+
+    # price_levels 校验和清洗
     raw_price_levels = result.get("price_levels", {})
     price_levels = {}
     if isinstance(raw_price_levels, dict):
@@ -76,7 +176,7 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
                 except (TypeError, ValueError):
                     pass
 
-    # ===== 新增：asymmetry 校验 =====
+    # asymmetry 校验
     asymmetry = result.get("asymmetry")
     if asymmetry not in ("upside", "downside", "symmetric", None):
         asymmetry = None
@@ -99,6 +199,7 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
         greeks_preference=greeks_preference,
         price_levels=price_levels,
         asymmetry=asymmetry,
+        market_context_data=market_context or {},
     )
 
 
@@ -164,7 +265,6 @@ def _rule_parse_text_to_intent(text: str, underlying_id: str = "510300") -> Inte
     if any(k in t for k in ["不做对角", "不要diagonal", "no diagonal"]):
         banned_strategies.extend(["diagonal_call", "diagonal_put"])
 
-    # 规则fallback里也支持备兑识别
     if any(k in t for k in ["备兑", "covered call", "卖备兑"]):
         allowed_strategies = ["covered_call"]
 
@@ -187,6 +287,7 @@ def _rule_parse_text_to_intent(text: str, underlying_id: str = "510300") -> Inte
         greeks_preference={},
         price_levels={},
         asymmetry=None,
+        market_context_data={},
     )
 
 
@@ -225,17 +326,46 @@ def build_disabled_backtest(resolved_candidates):
 
 
 def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> AdvisorRunResponse:
-    intent = parse_text_to_intent(text=text, underlying_id=underlying_id)
+    from app.data.market_context import build_market_context_multi
 
-    target_ids = intent.effective_underlying_ids
+    # 确定要计算context的标的列表
+    ctx_ids = ALL_UNDERLYING_IDS if underlying_id == "ALL" else [underlying_id]
 
+    # 先算iv_pct（market_context需要，同时后面compile也用）
+    iv_pcts: Dict[str, Optional[float]] = {}
+    for uid in ctx_ids:
+        try:
+            rpt = build_iv_percentile_report(engine, uid)
+            if rpt:
+                iv_pcts[uid] = rpt.get("composite_percentile")
+        except Exception:
+            pass
+
+    # 计算market_context
+    try:
+        market_context = build_market_context_multi(engine, ctx_ids, iv_pcts=iv_pcts)
+    except Exception as e:
+        print(f"[run_advisor] market_context failed: {e}")
+        market_context = {}
+
+    # 解析意图（含二八合成）
+    intent = parse_text_to_intent(
+        text=text,
+        underlying_id=underlying_id,
+        market_context=market_context,
+    )
+
+    # 单标的请求强制只跑传入的uid，不扩展
+    # ALL模式由advisor_v2.py的并行逻辑处理，每次传入的已经是单个uid
+    if underlying_id != "ALL":
+        target_ids = [underlying_id]
+    else:
+        target_ids = intent.effective_underlying_ids
     all_resolved: List[ResolvedStrategy] = []
 
     for uid in target_ids:
         uid_intent = intent.model_copy(update={"underlying_id": uid})
-
-        iv_report = build_iv_percentile_report(engine, uid)
-        iv_pct = iv_report["composite_percentile"] if iv_report else None
+        iv_pct = iv_pcts.get(uid)
 
         candidate_specs = compile_intent_to_strategies(uid_intent, iv_pct=iv_pct)
 
@@ -244,6 +374,7 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
                 rs = resolve_strategy(engine, spec)
                 if rs is not None:
                     rs.metadata["greeks_preference"] = uid_intent.greeks_preference
+                    rs.metadata["iv_pct"] = iv_pct  # ← 加这一行，让ranker能取到
                     all_resolved.append(rs)
             except Exception as e:
                 print(f"[run_advisor] {uid} {spec.strategy_type} failed: {e}")
@@ -262,5 +393,5 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
         backtest_result=backtest_result,
     )
     resp.calendar_recommendations = []
-    resp.briefing = build_briefing(ranked, text)
+    resp.briefing = build_briefing(ranked, text, market_context=market_context)
     return resp
