@@ -12,6 +12,23 @@ from app.models.schemas import (
 
 
 # ==============================
+# 辅助：从price_levels提取strike_pct_target
+# ==============================
+
+def _get_support(intent: IntentSpec) -> Optional[float]:
+    """下方支撑/保底位，负数百分比"""
+    return intent.price_levels.get("support")
+
+def _get_resistance(intent: IntentSpec) -> Optional[float]:
+    """上方压力位，正数百分比"""
+    return intent.price_levels.get("resistance")
+
+def _get_target(intent: IntentSpec) -> Optional[float]:
+    """目标价位，正负均可"""
+    return intent.price_levels.get("target")
+
+
+# ==============================
 # strategy spec factory
 # ==============================
 
@@ -25,6 +42,10 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         max_rel_spread=intent.max_rel_spread,
         min_quote_size=intent.min_quote_size,
     )
+
+    support = _get_support(intent)
+    resistance = _get_resistance(intent)
+    target = _get_target(intent)
 
     # ===== calendar =====
     if strategy_type == "call_calendar":
@@ -101,6 +122,7 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
 
     # ===== diagonal =====
     if strategy_type == "diagonal_call":
+        short_pct = resistance
         return StrategySpec(
             strategy_type="diagonal_call",
             underlying_id=underlying_id,
@@ -108,6 +130,8 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
                 StrategyLegSpec(
                     action="SELL", option_type="CALL", expiry_rule="nearest",
                     strike=None, delta_target=0.3, quantity=1,
+                    strike_pct_target=short_pct,
+                    strike_forced=(short_pct is not None),
                     leg_constraints=LegConstraint(
                         dte_min=10, dte_max=35,
                         max_rel_spread=intent.max_rel_spread,
@@ -135,6 +159,7 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         )
 
     if strategy_type == "diagonal_put":
+        short_pct = support
         return StrategySpec(
             strategy_type="diagonal_put",
             underlying_id=underlying_id,
@@ -142,6 +167,8 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
                 StrategyLegSpec(
                     action="SELL", option_type="PUT", expiry_rule="nearest",
                     strike=None, delta_target=0.3, quantity=1,
+                    strike_pct_target=short_pct,
+                    strike_forced=(short_pct is not None),
                     leg_constraints=LegConstraint(
                         dte_min=10, dte_max=35,
                         max_rel_spread=intent.max_rel_spread,
@@ -170,44 +197,85 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
 
     # ===== vertical =====
     if strategy_type == "bull_call_spread":
+        buy_pct = target
         return StrategySpec(
             strategy_type="bull_call_spread", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="nearest",    delta_target=0.5),
-                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="same_expiry", delta_target=0.3),
+                StrategyLegSpec(
+                    action="BUY", option_type="CALL", expiry_rule="nearest",
+                    delta_target=0.5,
+                    strike_pct_target=buy_pct,
+                    strike_forced=(buy_pct is not None),
+                ),
+                StrategyLegSpec(
+                    action="SELL", option_type="CALL", expiry_rule="same_expiry",
+                    delta_target=0.3,
+                    strike_pct_target=resistance,
+                    strike_forced=(resistance is not None),
+                ),
             ],
             constraints=common_constraints,
             rationale="bull call spread（debit，买平值卖虚值）", metadata={},
         )
 
     if strategy_type == "bear_call_spread":
+        short_pct = resistance
         return StrategySpec(
             strategy_type="bear_call_spread", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest",    delta_target=0.3),
-                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="same_expiry", delta_target=0.15),
+                StrategyLegSpec(
+                    action="SELL", option_type="CALL", expiry_rule="nearest",
+                    delta_target=0.3,
+                    strike_pct_target=short_pct,
+                    strike_forced=(short_pct is not None),
+                ),
+                StrategyLegSpec(
+                    action="BUY", option_type="CALL", expiry_rule="same_expiry",
+                    delta_target=0.15,
+                ),
             ],
             constraints=common_constraints,
             rationale="bear call spread（credit，卖虚值买更虚值）", metadata={},
         )
 
     if strategy_type == "bull_put_spread":
+        buy_pct = support
         return StrategySpec(
             strategy_type="bull_put_spread", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="nearest",     delta_target=0.3),
-                StrategyLegSpec(action="BUY",  option_type="PUT", expiry_rule="same_expiry",  delta_target=0.15),
+                StrategyLegSpec(
+                    action="SELL", option_type="PUT", expiry_rule="nearest",
+                    delta_target=0.3,
+                ),
+                StrategyLegSpec(
+                    action="BUY", option_type="PUT", expiry_rule="same_expiry",
+                    delta_target=0.15,
+                    strike_pct_target=buy_pct,
+                    strike_forced=(buy_pct is not None),
+                ),
             ],
             constraints=common_constraints,
             rationale="bull put spread（credit，卖虚值买更虚值）", metadata={},
         )
 
     if strategy_type == "bear_put_spread":
+        sell_pct = support
+        buy_pct = target
         return StrategySpec(
             strategy_type="bear_put_spread", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="BUY",  option_type="PUT", expiry_rule="nearest",     delta_target=0.5),
-                StrategyLegSpec(action="SELL", option_type="PUT", expiry_rule="same_expiry",  delta_target=0.3),
+                StrategyLegSpec(
+                    action="BUY", option_type="PUT", expiry_rule="nearest",
+                    delta_target=0.5,
+                    strike_pct_target=buy_pct,
+                    strike_forced=(buy_pct is not None),
+                ),
+                StrategyLegSpec(
+                    action="SELL", option_type="PUT", expiry_rule="same_expiry",
+                    delta_target=0.3,
+                    strike_pct_target=sell_pct,
+                    strike_forced=(sell_pct is not None),
+                ),
             ],
             constraints=common_constraints,
             rationale="bear put spread（debit，买平值卖虚值）", metadata={},
@@ -218,10 +286,26 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         return StrategySpec(
             strategy_type="iron_condor", underlying_id=underlying_id,
             legs=[
-                StrategyLegSpec(action="SELL", option_type="CALL", expiry_rule="nearest",    delta_target=0.3),
-                StrategyLegSpec(action="BUY",  option_type="CALL", expiry_rule="same_expiry", delta_target=0.15),
-                StrategyLegSpec(action="SELL", option_type="PUT",  expiry_rule="nearest",    delta_target=0.3),
-                StrategyLegSpec(action="BUY",  option_type="PUT",  expiry_rule="same_expiry", delta_target=0.15),
+                StrategyLegSpec(
+                    action="SELL", option_type="CALL", expiry_rule="nearest",
+                    delta_target=0.3,
+                    strike_pct_target=resistance,
+                    strike_forced=(resistance is not None),
+                ),
+                StrategyLegSpec(
+                    action="BUY", option_type="CALL", expiry_rule="same_expiry",
+                    delta_target=0.15,
+                ),
+                StrategyLegSpec(
+                    action="SELL", option_type="PUT", expiry_rule="nearest",
+                    delta_target=0.3,
+                    strike_pct_target=support,
+                    strike_forced=(support is not None),
+                ),
+                StrategyLegSpec(
+                    action="BUY", option_type="PUT", expiry_rule="same_expiry",
+                    delta_target=0.15,
+                ),
             ],
             constraints=common_constraints,
             rationale="iron condor（IV高+中性，卖双侧虚值）", metadata={},
@@ -241,14 +325,16 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         )
 
     # ===== 单腿买方 =====
-
     if strategy_type == "long_call":
+        buy_pct = target if target and target > 0 else None
         return StrategySpec(
             strategy_type="long_call", underlying_id=underlying_id,
             legs=[
                 StrategyLegSpec(
                     action="BUY", option_type="CALL", expiry_rule="nearest",
                     strike=None, delta_target=0.50, quantity=1,
+                    strike_pct_target=buy_pct,
+                    strike_forced=(buy_pct is not None),
                     leg_constraints=LegConstraint(
                         dte_min=45, dte_max=90,
                         max_rel_spread=0.04, min_quote_size=1,
@@ -261,12 +347,15 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         )
 
     if strategy_type == "long_put":
+        buy_pct = target if target and target < 0 else None
         return StrategySpec(
             strategy_type="long_put", underlying_id=underlying_id,
             legs=[
                 StrategyLegSpec(
                     action="BUY", option_type="PUT", expiry_rule="nearest",
                     strike=None, delta_target=0.50, quantity=1,
+                    strike_pct_target=buy_pct,
+                    strike_forced=(buy_pct is not None),
                     leg_constraints=LegConstraint(
                         dte_min=45, dte_max=90,
                         max_rel_spread=0.04, min_quote_size=1,
@@ -279,14 +368,16 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         )
 
     # ===== 单腿卖方 =====
-
     if strategy_type == "naked_call":
+        short_pct = resistance
         return StrategySpec(
             strategy_type="naked_call", underlying_id=underlying_id,
             legs=[
                 StrategyLegSpec(
                     action="SELL", option_type="CALL", expiry_rule="nearest",
                     strike=None, delta_target=0.18, quantity=1,
+                    strike_pct_target=short_pct,
+                    strike_forced=(short_pct is not None),
                     leg_constraints=LegConstraint(
                         dte_min=10, dte_max=35,
                         max_rel_spread=0.03, min_quote_size=1,
@@ -299,12 +390,15 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         )
 
     if strategy_type == "naked_put":
+        short_pct = support
         return StrategySpec(
             strategy_type="naked_put", underlying_id=underlying_id,
             legs=[
                 StrategyLegSpec(
                     action="SELL", option_type="PUT", expiry_rule="nearest",
                     strike=None, delta_target=0.18, quantity=1,
+                    strike_pct_target=short_pct,
+                    strike_forced=(short_pct is not None),
                     leg_constraints=LegConstraint(
                         dte_min=10, dte_max=35,
                         max_rel_spread=0.03, min_quote_size=1,
@@ -317,12 +411,15 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
         )
 
     if strategy_type == "covered_call":
+        short_pct = resistance
         return StrategySpec(
             strategy_type="covered_call", underlying_id=underlying_id,
             legs=[
                 StrategyLegSpec(
                     action="SELL", option_type="CALL", expiry_rule="nearest",
                     strike=None, delta_target=0.20, quantity=1,
+                    strike_pct_target=short_pct,
+                    strike_forced=(short_pct is not None),
                     leg_constraints=LegConstraint(
                         dte_min=60, dte_max=180,
                         max_rel_spread=0.03, min_quote_size=1,
@@ -402,8 +499,26 @@ def compile_intent_to_strategies(
             ("naked_put",    0.65),
         ]
 
+    # ===== asymmetry 驱动 =====
+    if intent.asymmetry == "downside":
+        candidates += [
+            ("bear_put_spread", 0.80),
+            ("long_put",        0.65),
+            ("diagonal_put",    0.75),
+        ]
+    elif intent.asymmetry == "upside":
+        candidates += [
+            ("bull_call_spread", 0.80),
+            ("long_call",        0.65),
+            ("diagonal_call",    0.75),
+        ]
+    elif intent.asymmetry == "symmetric":
+        candidates += [
+            ("long_call", 0.70),
+            ("long_put",  0.70),
+        ]
+
     # ===== prefer_multi_leg 驱动 =====
-    # 只加权diagonal，不加calendar（calendar是中性策略，不因prefer_multi_leg自动拉高）
     if intent.prefer_multi_leg:
         candidates += [
             ("diagonal_call", 0.80),
@@ -423,11 +538,9 @@ def compile_intent_to_strategies(
                 best_map[k] = min(best_map[k], 0.25)
         if "covered_call" in best_map:
             best_map["covered_call"] = min(best_map["covered_call"], 0.45)
-        # call偏贵时，买call类debit spread也应降权（call腿本身偏贵）
         if intent.vol_view == "call_iv_rich":
             if "bull_call_spread" in best_map:
                 best_map["bull_call_spread"] = min(best_map["bull_call_spread"], 0.40)
-        # put偏贵时，买put类debit spread降权
         if intent.vol_view == "put_iv_rich":
             if "bear_put_spread" in best_map:
                 best_map["bear_put_spread"] = min(best_map["bear_put_spread"], 0.40)
@@ -435,24 +548,19 @@ def compile_intent_to_strategies(
     # ===== IV percentile 驱动调整 =====
     if iv_pct is not None:
         if iv_pct <= 0.15:
-            # IV极低：压制卖方和iron，激活买单边
-            # debit vertical（bull_call_spread/bear_put_spread）豁免——低IV时方向性成本低，合理
             for k in ("iron_condor", "iron_fly", "bear_call_spread",
-                      "bull_put_spread",
-                      "naked_call", "naked_put", "covered_call"):
+                      "bull_put_spread", "naked_call", "naked_put", "covered_call"):
                 if k in best_map:
                     best_map[k] = min(best_map[k], 0.20)
             best_map["long_call"] = max(best_map.get("long_call", 0), 0.85)
             best_map["long_put"]  = max(best_map.get("long_put",  0), 0.85)
 
         elif iv_pct <= 0.30:
-            # IV偏低：iron和裸卖降权
             for k in ("iron_condor", "iron_fly", "naked_call", "naked_put"):
                 if k in best_map:
                     best_map[k] = round(best_map[k] * 0.7, 3)
 
         elif iv_pct >= 0.85:
-            # IV极高：卖方大幅加权，买单边移除
             for k in ("iron_condor", "iron_fly", "bear_call_spread",
                       "bull_put_spread", "naked_call", "naked_put", "covered_call"):
                 if k in best_map:
@@ -461,7 +569,6 @@ def compile_intent_to_strategies(
             best_map.pop("long_put", None)
 
         elif iv_pct >= 0.70:
-            # IV偏高：卖方加权，买单边降权
             for k in ("iron_condor", "iron_fly", "bear_call_spread",
                       "bull_put_spread", "naked_call", "naked_put", "covered_call"):
                 if k in best_map:
@@ -471,8 +578,6 @@ def compile_intent_to_strategies(
                     best_map[k] = round(best_map[k] * 0.5, 3)
 
     # ===== allowed_strategies 提权 =====
-    # 用户明确指定的策略（来自llm_parser的preferred_strategies），prior强制提到0.90
-    # 如果策略不在best_map里（没被其他规则激活），也加进去
     if intent.allowed_strategies:
         for k in intent.allowed_strategies:
             if k in best_map:

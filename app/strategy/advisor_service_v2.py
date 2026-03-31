@@ -41,9 +41,45 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
         underlying_ids = [underlying_id]
 
     # preferred_strategies → allowed_strategies
-    # LLM识别到用户明确倾向的策略，传给compiler提权用
     preferred = result.get("preferred_strategies", [])
     allowed_strategies = preferred if preferred else None
+
+    # ===== 新增：greeks_preference 校验和清洗 =====
+    # 只保留格式合法的字段，忽略LLM可能输出的脏数据
+    raw_greeks = result.get("greeks_preference", {})
+    greeks_preference = {}
+    if isinstance(raw_greeks, dict):
+        for greek, pref in raw_greeks.items():
+            if not isinstance(pref, dict):
+                continue
+            sign = pref.get("sign")
+            strength = pref.get("strength")
+            if sign not in ("positive", "negative", "neutral"):
+                continue
+            try:
+                strength = float(strength)
+            except (TypeError, ValueError):
+                continue
+            if not (0.0 <= strength <= 1.0):
+                continue
+            greeks_preference[greek] = {"sign": sign, "strength": strength}
+
+    # ===== 新增：price_levels 校验和清洗 =====
+    raw_price_levels = result.get("price_levels", {})
+    price_levels = {}
+    if isinstance(raw_price_levels, dict):
+        for k in ("support", "resistance", "target"):
+            v = raw_price_levels.get(k)
+            if v is not None:
+                try:
+                    price_levels[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+
+    # ===== 新增：asymmetry 校验 =====
+    asymmetry = result.get("asymmetry")
+    if asymmetry not in ("upside", "downside", "symmetric", None):
+        asymmetry = None
 
     return IntentSpec(
         underlying_id=underlying_ids[0],
@@ -60,6 +96,9 @@ def parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec
         allowed_strategies=allowed_strategies,
         banned_strategies=result.get("banned_strategies", []),
         raw_text=text,
+        greeks_preference=greeks_preference,
+        price_levels=price_levels,
+        asymmetry=asymmetry,
     )
 
 
@@ -145,6 +184,9 @@ def _rule_parse_text_to_intent(text: str, underlying_id: str = "510300") -> Inte
         allowed_strategies=allowed_strategies,
         banned_strategies=banned_strategies,
         raw_text=text,
+        greeks_preference={},
+        price_levels={},
+        asymmetry=None,
     )
 
 
@@ -201,6 +243,7 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
             try:
                 rs = resolve_strategy(engine, spec)
                 if rs is not None:
+                    rs.metadata["greeks_preference"] = uid_intent.greeks_preference
                     all_resolved.append(rs)
             except Exception as e:
                 print(f"[run_advisor] {uid} {spec.strategy_type} failed: {e}")

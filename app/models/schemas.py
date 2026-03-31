@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
-
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from typing import Literal
 
@@ -50,6 +49,20 @@ class IntentSpec(BaseModel):
     banned_strategies: List[str] = Field(default_factory=list)
     raw_text: Optional[str] = None
 
+    # ===== 新增：Greeks意图偏好 =====
+    # 格式：{"delta": {"sign": "positive"|"negative"|"neutral", "strength": 0.0-1.0}, ...}
+    # 只包含用户明确表达了偏好的Greek，未提及的不出现
+    greeks_preference: Dict[str, Any] = Field(default_factory=dict)
+
+    # ===== 新增：价格水平（相对当前价的百分比，负数=下方）=====
+    # 格式：{"support": -0.12, "resistance": 0.08, "target": -0.05}
+    # 只包含用户明确提到的价位
+    price_levels: Dict[str, Optional[float]] = Field(default_factory=dict)
+
+    # ===== 新增：非对称预期 =====
+    # "upside" | "downside" | "symmetric" | None
+    asymmetry: Optional[str] = None
+
     @property
     def effective_underlying_ids(self) -> List[str]:
         """返回实际要跑的标的列表"""
@@ -81,8 +94,16 @@ class StrategyLegSpec(BaseModel):
     delta_target: Optional[float] = None
     quantity: int = 1
 
-    # 新增：为 calendar / diagonal 预留分腿约束
+    # 为 calendar / diagonal 预留分腿约束
     leg_constraints: Optional[LegConstraint] = None
+
+    # ===== 新增：用户指定的strike百分比目标（相对spot，负数=下方）=====
+    # 有值时resolver优先按此选腿，忽略delta_target
+    strike_pct_target: Optional[float] = None
+
+    # ===== 新增：是否由用户指定strike =====
+    # True时ranker跳过该腿的delta评分
+    strike_forced: bool = False
 
 
 class StrategySpec(BaseModel):
@@ -131,6 +152,9 @@ class ResolvedLeg(BaseModel):
     iv: Optional[float] = None
     dte: Optional[int] = None
     quantity: int = 1
+
+    # ===== 新增：是否由用户指定strike，True时ranker跳过delta评分 =====
+    strike_forced: bool = False
 
 
 class ResolvedStrategy(BaseModel):

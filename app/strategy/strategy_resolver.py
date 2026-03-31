@@ -220,7 +220,7 @@ def filter_quotes_for_constraints(
             if rel_spread > max_rel_spread:
                 continue
 
-        # 行权价过滤：非0.05整数倍的是除权合约，份数不标准，不能构建组合
+        # 行权价过滤：非0.05整数倍的是除权合约
         strike = q.get("strike")
         if strike is not None:
             strike_rounded = round(float(strike) * 20) / 20
@@ -276,6 +276,30 @@ def choose_by_delta_target(
     if not valid:
         return None
     return min(valid, key=lambda q: abs(abs(q["delta"]) - delta_target))
+
+
+def choose_by_strike_pct(
+    quotes: List[Dict[str, Any]],
+    option_type: str,
+    expiry: date,
+    spot: float,
+    strike_pct: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    按用户指定的strike百分比（相对spot）选腿。
+    strike_pct为负表示下方（如-0.12表示spot×0.88），正表示上方。
+    找最近的合规strike合约。
+    """
+    target_strike = spot * (1.0 + strike_pct)
+    pool = [
+        q for q in quotes
+        if q["option_type"] == option_type
+        and q["expiry_date"] == expiry
+        and q["strike"] is not None
+    ]
+    if not pool:
+        return None
+    return min(pool, key=lambda q: abs(q["strike"] - target_strike))
 
 
 def choose_same_expiry_leg(
@@ -407,7 +431,16 @@ def choose_calendar_near_leg(
     return min(matchable_near, key=lambda q: abs(q["strike"] / spot - 1.0))
 
 
-def build_resolved_leg(q: dict, action: str, quantity: int = 1):
+def build_resolved_leg(
+    q: dict,
+    action: str,
+    quantity: int = 1,
+    strike_forced: bool = False,
+) -> ResolvedLeg:
+    """
+    构造ResolvedLeg。
+    strike_forced=True时ranker会跳过该腿的delta评分。
+    """
     price = q.get("price")
     if price is None:
         price = q.get("option_market_price")
@@ -447,6 +480,32 @@ def build_resolved_leg(q: dict, action: str, quantity: int = 1):
         vega=q.get("vega"),
         iv=iv,
         dte=dte,
+        strike_forced=strike_forced,
+    )
+
+
+def _choose_leg_quote(
+    quotes: List[Dict[str, Any]],
+    leg_spec: StrategyLegSpec,
+    expiry: date,
+    spot: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    统一选腿入口：有strike_pct_target时按百分比选，否则按delta_target选。
+    """
+    if leg_spec.strike_pct_target is not None:
+        return choose_by_strike_pct(
+            quotes=quotes,
+            option_type=leg_spec.option_type,
+            expiry=expiry,
+            spot=spot,
+            strike_pct=leg_spec.strike_pct_target,
+        )
+    return choose_same_expiry_leg(
+        quotes=quotes,
+        option_type=leg_spec.option_type,
+        expiry=expiry,
+        delta_target=leg_spec.delta_target,
     )
 
 
@@ -559,21 +618,20 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
             near_expiry=first_expiry, far_expiry=calendar_second_expiry, spot=spot,
         )
     elif strategy.strategy_type in ("diagonal_call", "diagonal_put"):
-        first_leg_quote = choose_same_expiry_leg(
-            first_filtered, option_type=first_leg_spec.option_type,
-            expiry=first_expiry, delta_target=first_leg_spec.delta_target,
-        )
+        first_leg_quote = _choose_leg_quote(first_filtered, first_leg_spec, first_expiry, spot)
     else:
-        first_leg_quote = choose_same_expiry_leg(
-            first_filtered, option_type=first_leg_spec.option_type,
-            expiry=first_expiry, delta_target=first_leg_spec.delta_target,
-        )
+        first_leg_quote = _choose_leg_quote(first_filtered, first_leg_spec, first_expiry, spot)
 
     logger.debug(f"[resolver] first_leg_quote found = {first_leg_quote is not None}")
     if first_leg_quote is None:
         return None
 
-    resolved_legs.append(build_resolved_leg(first_leg_quote, action=first_leg_spec.action, quantity=first_leg_spec.quantity))
+    resolved_legs.append(build_resolved_leg(
+        first_leg_quote,
+        action=first_leg_spec.action,
+        quantity=first_leg_spec.quantity,
+        strike_forced=first_leg_spec.strike_forced,
+    ))
 
     if len(strategy.legs) >= 2:
         second_leg_spec: StrategyLegSpec = strategy.legs[1]
@@ -581,10 +639,21 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
         logger.debug(f"[resolver] second leg dte range = {second_dte_min} ~ {second_dte_max}")
 
         if strategy.strategy_type in ("bear_call_spread", "bull_put_spread", "bull_call_spread", "bear_put_spread"):
-            second_leg_quote = choose_vertical_buy_leg(
-                quotes=first_filtered, first_leg=first_leg_quote,
-                strategy_type=strategy.strategy_type, delta_target=second_leg_spec.delta_target,
-            )
+            # vertical的第二腿：有strike_pct_target时直接按百分比选，否则按原逻辑
+            if second_leg_spec.strike_pct_target is not None:
+                second_leg_quote = choose_by_strike_pct(
+                    quotes=first_filtered,
+                    option_type=second_leg_spec.option_type,
+                    expiry=first_expiry,
+                    spot=spot,
+                    strike_pct=second_leg_spec.strike_pct_target,
+                )
+            else:
+                second_leg_quote = choose_vertical_buy_leg(
+                    quotes=first_filtered, first_leg=first_leg_quote,
+                    strategy_type=strategy.strategy_type,
+                    delta_target=second_leg_spec.delta_target,
+                )
         else:
             if strategy.strategy_type in ("call_calendar", "put_calendar"):
                 second_filtered = calendar_second_filtered or []
@@ -595,7 +664,9 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
                 if not second_filtered:
                     return None
                 second_grouped = group_by_expiry(second_filtered)
-                second_expiry = choose_expiry(second_grouped, second_leg_spec.expiry_rule, reference_expiry=first_expiry)
+                second_expiry = choose_expiry(
+                    second_grouped, second_leg_spec.expiry_rule, reference_expiry=first_expiry
+                )
 
             logger.debug(f"[resolver] second_expiry = {second_expiry}")
             if second_expiry is None:
@@ -608,21 +679,24 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
                     delta_target=second_leg_spec.delta_target,
                 )
             elif strategy.strategy_type in ("diagonal_call", "diagonal_put"):
-                second_leg_quote = choose_same_expiry_leg(
-                    second_filtered, option_type=second_leg_spec.option_type,
-                    expiry=second_expiry, delta_target=second_leg_spec.delta_target,
+                second_leg_quote = _choose_leg_quote(
+                    second_filtered, second_leg_spec, second_expiry, spot
                 )
             else:
-                second_leg_quote = choose_same_expiry_leg(
-                    second_filtered, option_type=second_leg_spec.option_type,
-                    expiry=second_expiry, delta_target=second_leg_spec.delta_target,
+                second_leg_quote = _choose_leg_quote(
+                    second_filtered, second_leg_spec, second_expiry, spot
                 )
 
         logger.debug(f"[resolver] second_leg_quote found = {second_leg_quote is not None}")
         if second_leg_quote is None:
             return None
 
-        resolved_legs.append(build_resolved_leg(second_leg_quote, action=second_leg_spec.action, quantity=second_leg_spec.quantity))
+        resolved_legs.append(build_resolved_leg(
+            second_leg_quote,
+            action=second_leg_spec.action,
+            quantity=second_leg_spec.quantity,
+            strike_forced=second_leg_spec.strike_forced,
+        ))
 
     net_premium, net_credit, net_debit = calc_net_premium(resolved_legs)
 

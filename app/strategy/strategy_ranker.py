@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.models.schemas import ResolvedStrategy
 from app.strategy.greeks_monitor import compute_strategy_net_greeks
@@ -26,7 +26,6 @@ def _avg_rel_spread(strategy: ResolvedStrategy) -> float:
 
 
 def _liquidity_score(strategy: ResolvedStrategy) -> float:
-    """相对价差越小越好。"""
     avg_spread = _avg_rel_spread(strategy)
     if avg_spread <= 0.01:
         return 1.0
@@ -40,11 +39,6 @@ def _liquidity_score(strategy: ResolvedStrategy) -> float:
 
 
 def _cost_score(strategy: ResolvedStrategy) -> float:
-    """
-    通用成本评分（多腿结构用）：
-    - credit strategy：净收入越高越好
-    - debit strategy：净支出越低越好
-    """
     if strategy.net_credit is not None:
         if strategy.net_credit >= 0.08:
             return 1.0
@@ -71,11 +65,6 @@ def _cost_score(strategy: ResolvedStrategy) -> float:
 
 
 def _calc_calendar_signal_score(iv_diff: float | None) -> float:
-    """
-    long calendar: sell near / buy far
-    iv_diff = far_iv - near_iv（负数代表近月更贵，是我们想要的）
-    连续函数：近月溢价越大得分越高，上限在溢价5个vol点饱和
-    """
     if iv_diff is None:
         return 0.0
     near_premium = -iv_diff
@@ -90,7 +79,6 @@ def _calc_calendar_signal_score(iv_diff: float | None) -> float:
 
 
 def _calc_calendar_cost_score(net_debit: float | None, spot_price: float | None) -> float:
-    """calendar/diagonal 按 debit/spot 相对成本打分。"""
     if net_debit is None or spot_price is None or spot_price <= 0:
         return 0.0
     ratio = net_debit / spot_price
@@ -106,7 +94,6 @@ def _calc_calendar_cost_score(net_debit: float | None, spot_price: float | None)
 
 
 def _calc_calendar_moneyness_score(strike: float | None, spot_price: float | None) -> float:
-    """strike 越接近 ATM 越好（calendar 专用）。"""
     if strike is None or spot_price is None or spot_price <= 0:
         return 0.0
     dist = abs(strike / spot_price - 1.0)
@@ -122,7 +109,6 @@ def _calc_calendar_moneyness_score(strike: float | None, spot_price: float | Non
 
 
 def _extract_prior_weight(strategy: ResolvedStrategy) -> float:
-    """从 metadata 里取 prior_weight，兼容两种存放位置。"""
     if not strategy.metadata:
         return 1.0
     if "prior_weight" in strategy.metadata:
@@ -138,7 +124,6 @@ def _extract_prior_weight(strategy: ResolvedStrategy) -> float:
 
 
 def _extract_iv_pct(strategy: ResolvedStrategy) -> float:
-    """从 metadata 里取 iv_pct，找不到返回 0.5（中性假设）。"""
     if not strategy.metadata:
         return 0.5
     if "iv_pct" in strategy.metadata:
@@ -153,12 +138,115 @@ def _extract_iv_pct(strategy: ResolvedStrategy) -> float:
         return 0.5
 
 
+def _extract_greeks_preference(strategy: ResolvedStrategy) -> Dict[str, Any]:
+    """
+    从metadata里取greeks_preference。
+    由advisor_service_v2在run_advisor里把intent.greeks_preference写入metadata。
+    """
+    if not strategy.metadata:
+        return {}
+    gp = strategy.metadata.get("greeks_preference")
+    if isinstance(gp, dict):
+        return gp
+    sm = strategy.metadata.get("strategy_metadata") or {}
+    gp = sm.get("greeks_preference")
+    if isinstance(gp, dict):
+        return gp
+    return {}
+
+
+# ============================================================
+# Greeks意图调整（greeks_intent_adj）
+# ============================================================
+
+def _calc_greeks_intent_adj(
+    strategy: ResolvedStrategy,
+    greeks_preference: Dict[str, Any],
+    net_greeks: Dict[str, Any],
+) -> float:
+    """
+    根据用户的Greeks意图偏好调整评分，最多±25%。
+
+    greeks_preference格式：
+    {
+        "gamma": {"sign": "positive", "strength": 0.9},
+        "delta": {"sign": "negative", "strength": 0.3},
+        ...
+    }
+
+    sign匹配：实际Greek符号与用户期望符号一致 → match=1.0
+    sign不匹配 → match=-0.5（惩罚幅度低于奖励，避免过度压制）
+    sign为neutral → match=0.0（忽略该维度）
+
+    最终公式：
+    intent_score = 加权平均(strength × match) / 加权平均(strength)
+    greeks_adj = 0.75 + 0.25 × intent_score
+    范围：[0.75, 1.0]（只奖不罚到底，最低0.75）
+
+    strike_forced的腿不参与delta匹配判断：
+    如果所有腿都是strike_forced，delta维度跳过。
+    """
+    if not greeks_preference:
+        return 1.0
+
+    greek_map = {
+        "delta": net_greeks.get("net_delta"),
+        "gamma": net_greeks.get("net_gamma"),
+        "vega":  net_greeks.get("net_vega"),
+        "theta": net_greeks.get("net_theta"),
+    }
+
+    # delta特殊处理：如果所有腿都是strike_forced，跳过delta维度
+    all_strike_forced = all(getattr(leg, "strike_forced", False) for leg in strategy.legs)
+
+    total_weight = 0.0
+    weighted_match = 0.0
+
+    for greek, pref in greeks_preference.items():
+        if not isinstance(pref, dict):
+            continue
+
+        sign = pref.get("sign")
+        strength = pref.get("strength", 0.5)
+
+        # neutral意图不参与计算
+        if sign == "neutral":
+            continue
+
+        # delta：全腿strike_forced时跳过
+        if greek == "delta" and all_strike_forced:
+            continue
+
+        actual_value = greek_map.get(greek)
+        if actual_value is None:
+            continue
+
+        # 判断符号是否匹配
+        if sign == "positive":
+            match = 1.0 if actual_value > 0 else -0.5
+        elif sign == "negative":
+            match = 1.0 if actual_value < 0 else -0.5
+        else:
+            continue
+
+        total_weight += strength
+        weighted_match += strength * match
+
+    if total_weight <= 0:
+        return 1.0
+
+    intent_score = weighted_match / total_weight
+    # intent_score范围：[-0.5, 1.0]
+    # 映射到adj：[-0.5→0.75, 1.0→1.0]
+    greeks_adj = 0.75 + 0.25 * max(-1.0, intent_score)
+    return round(max(0.75, greeks_adj), 4)
+
+
 # ============================================================
 # 各类型专属 scorer
 # ============================================================
 
 def _score_calendar_strategy(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
-    """call_calendar / put_calendar：ATM 同 strike 卖近买远。"""
     if len(strategy.legs) < 2:
         return 0.0, {
             "signal_score": 0.0, "liquidity_score": 0.0,
@@ -177,10 +265,6 @@ def _score_calendar_strategy(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
     cost_score      = _calc_calendar_cost_score(strategy.net_debit, strategy.spot_price)
     moneyness_score = _calc_calendar_moneyness_score(near_leg.strike, strategy.spot_price)
 
-    # 极端IV差豁免moneyness惩罚：
-    # near_premium >= 0.08时（近月IV比远月高8个vol点以上），
-    # 说明是定价偏离套利机会，strike偏离ATM是可接受的
-    # 将moneyness_score至少提升到0.8
     if iv_diff is not None and (-iv_diff) >= 0.08:
         moneyness_score = max(moneyness_score, 0.8)
 
@@ -201,23 +285,12 @@ def _score_calendar_strategy(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
 
 
 def _score_diagonal_strategy(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
-    """
-    diagonal_call / diagonal_put：卖近月虚值腿，买远月 ATM 腿。
-
-    信号维度：
-      1. iv_diff_score      — 期限结构（near IV 更贵更好），连续函数
-      2. near_delta_score   — 近腿虚值程度（0.25~0.35 最理想）
-      3. delta_spread_score — 两腿 delta 差，连续函数（峰值0.15-0.20，两侧线性衰减）
-      4. cost_score         — 净权利金 / spot
-      5. liquidity_score
-    """
     if len(strategy.legs) < 2:
         return 0.0, {"signal_score": 0.0, "liquidity_score": 0.0, "cost_score": 0.0}
 
-    near_leg = strategy.legs[0]  # SELL near
-    far_leg  = strategy.legs[1]  # BUY far
+    near_leg = strategy.legs[0]
+    far_leg  = strategy.legs[1]
 
-    # 1. iv_diff（连续函数，复用calendar逻辑）
     iv_diff = None
     if near_leg.iv is not None and far_leg.iv is not None:
         iv_diff = far_leg.iv - near_leg.iv
@@ -234,7 +307,6 @@ def _score_diagonal_strategy(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
         else:
             iv_diff_score = 0.1
 
-    # 2. near_delta
     near_abs_delta = abs(near_leg.delta) if near_leg.delta is not None else None
     if near_abs_delta is None:
         near_delta_score = 0.3
@@ -249,7 +321,6 @@ def _score_diagonal_strategy(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
     else:
         near_delta_score = 0.4
 
-    # 3. delta_spread：连续函数，峰值在0.15-0.20，两侧线性衰减
     far_abs_delta = abs(far_leg.delta) if far_leg.delta is not None else None
     if near_abs_delta is not None and far_abs_delta is not None:
         d_spread = far_abs_delta - near_abs_delta
@@ -300,7 +371,6 @@ def _score_diagonal_strategy(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
 
 
 def _score_iron_structure(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
-    """iron_condor / iron_fly：delta 中性卖方，关注 gamma/vega 敞口。"""
     liquidity_score = _liquidity_score(strategy)
     cost_score      = _cost_score(strategy)
 
@@ -384,22 +454,16 @@ def _score_iron_structure(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
 
 
 def _score_vertical_spread(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
-    """
-    bear_call_spread / bull_put_spread  → credit spread：卖方收权利金，保护型
-    bull_call_spread / bear_put_spread  → debit spread：买方博方向，进攻型
-
-    credit：卖腿delta目标0.30，买腿delta目标0.15，cost用credit/spot相对值
-    debit：买腿delta目标0.45-0.55，卖腿delta目标0.20-0.30，cost用debit/spot相对值
-    """
     sell_legs = [l for l in strategy.legs if l.action == "SELL"]
     buy_legs  = [l for l in strategy.legs if l.action == "BUY"]
 
     is_debit = strategy.strategy_type in ("bull_call_spread", "bear_put_spread")
 
     if is_debit:
-        # 买腿是主力，接近平值；卖腿是上限，偏虚值
-        if buy_legs and buy_legs[0].delta is not None:
-            d = abs(buy_legs[0].delta)
+        # 买腿：strike_forced时跳过delta评分
+        buy_leg = buy_legs[0] if buy_legs else None
+        if buy_leg and not getattr(buy_leg, "strike_forced", False) and buy_leg.delta is not None:
+            d = abs(buy_leg.delta)
             if 0.40 <= d <= 0.60:
                 buy_delta_score = 1.0
             elif 0.35 <= d < 0.40 or 0.60 < d <= 0.70:
@@ -409,10 +473,12 @@ def _score_vertical_spread(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
             else:
                 buy_delta_score = 0.3
         else:
-            buy_delta_score = 0.3
+            buy_delta_score = 0.7  # strike_forced时给中性分，不惩罚
 
-        if sell_legs and sell_legs[0].delta is not None:
-            d = abs(sell_legs[0].delta)
+        # 卖腿：strike_forced时跳过delta评分
+        sell_leg = sell_legs[0] if sell_legs else None
+        if sell_leg and not getattr(sell_leg, "strike_forced", False) and sell_leg.delta is not None:
+            d = abs(sell_leg.delta)
             if 0.20 <= d <= 0.30:
                 sell_delta_score = 1.0
             elif 0.15 <= d < 0.20 or 0.30 < d <= 0.35:
@@ -422,9 +488,8 @@ def _score_vertical_spread(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
             else:
                 sell_delta_score = 0.3
         else:
-            sell_delta_score = 0.3
+            sell_delta_score = 0.7
 
-        # debit成本：净支出/spot，越低越好
         spot  = strategy.spot_price or 0
         debit = strategy.net_debit
         if debit is None or spot <= 0:
@@ -445,9 +510,10 @@ def _score_vertical_spread(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
         signal_score = 0.65 * buy_delta_score + 0.35 * sell_delta_score
 
     else:
-        # 卖腿是核心收权利金，买腿是便宜保护
-        if sell_legs and sell_legs[0].delta is not None:
-            diff = abs(abs(sell_legs[0].delta) - 0.30)
+        # 卖腿：strike_forced时跳过delta评分
+        sell_leg = sell_legs[0] if sell_legs else None
+        if sell_leg and not getattr(sell_leg, "strike_forced", False) and sell_leg.delta is not None:
+            diff = abs(abs(sell_leg.delta) - 0.30)
             if diff <= 0.03:
                 sell_delta_score = 1.0
             elif diff <= 0.07:
@@ -457,10 +523,12 @@ def _score_vertical_spread(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
             else:
                 sell_delta_score = 0.3
         else:
-            sell_delta_score = 0.3
+            sell_delta_score = 0.7
 
-        if buy_legs and buy_legs[0].delta is not None:
-            diff = abs(abs(buy_legs[0].delta) - 0.15)
+        # 买腿：strike_forced时跳过delta评分
+        buy_leg = buy_legs[0] if buy_legs else None
+        if buy_leg and not getattr(buy_leg, "strike_forced", False) and buy_leg.delta is not None:
+            diff = abs(abs(buy_leg.delta) - 0.15)
             if diff <= 0.03:
                 buy_delta_score = 1.0
             elif diff <= 0.07:
@@ -470,9 +538,8 @@ def _score_vertical_spread(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
             else:
                 buy_delta_score = 0.3
         else:
-            buy_delta_score = 0.3
+            buy_delta_score = 0.7
 
-        # credit成本：净收入/spot，越高越好
         spot   = strategy.spot_price or 0
         credit = strategy.net_credit
         if credit is None or spot <= 0:
@@ -511,12 +578,6 @@ def _score_vertical_spread(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
 
 
 def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
-    """
-    naked_call / naked_put / covered_call / long_call / long_put
-
-    买方（long）：delta + vega + iv_pct + cost
-    卖方（naked/covered）：delta/yield + cost + liquidity
-    """
     if not strategy.legs:
         return 0.0, {"signal_score": 0.0, "liquidity_score": 0.0, "cost_score": 0.0}
 
@@ -524,23 +585,25 @@ def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
     is_sell   = (leg.action == "SELL")
     abs_delta = abs(leg.delta) if leg.delta is not None else None
 
+    # strike_forced时单腿delta评分给中性分
+    leg_strike_forced = getattr(leg, "strike_forced", False)
+
     vega_score: float  = 0.0
     iv_score: float    = 0.0
     theta_score: float = 0.0
 
-    # ── 核心信号评分 ──
     if strategy.strategy_type in ("naked_call", "naked_put"):
-        if abs_delta is None:
-            delta_score = 0.3
-        elif abs_delta <= 0.15:                # 太虚，权利金太薄
+        if leg_strike_forced or abs_delta is None:
+            delta_score = 0.7  # 用户指定strike，不评delta
+        elif abs_delta <= 0.15:
             delta_score = 0.75
-        elif abs(abs_delta - 0.18) <= 0.03:   # 0.15~0.21，精准命中甜区
+        elif abs(abs_delta - 0.18) <= 0.03:
             delta_score = 1.0
-        elif abs_delta <= 0.28:                # 0.21~0.28，可接受
+        elif abs_delta <= 0.28:
             delta_score = 0.85
-        elif abs_delta <= 0.35:                # 0.28~0.35，偏深
+        elif abs_delta <= 0.35:
             delta_score = 0.6
-        else:                                  # >0.35，太深
+        else:
             delta_score = 0.3
 
     elif strategy.strategy_type == "covered_call":
@@ -578,8 +641,8 @@ def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
                 delta_score = 0.3
 
     elif strategy.strategy_type in ("long_call", "long_put"):
-        if abs_delta is None:
-            delta_score = 0.3
+        if leg_strike_forced or abs_delta is None:
+            delta_score = 0.7
         elif 0.35 <= abs_delta <= 0.50:
             delta_score = 1.0
         elif 0.50 < abs_delta <= 0.65:
@@ -599,15 +662,12 @@ def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
         iv_pct   = _extract_iv_pct(strategy)
         iv_score = 1.0 - iv_pct
 
-        # theta：买方希望时间损耗慢，abs(theta)越小越好
-        # 0.001以下极低损耗→1.0，0.008以上高损耗→0.0，线性插值
         raw_theta   = abs(leg.theta) if leg.theta is not None else 0.004
         theta_score = max(0.0, 1.0 - raw_theta / 0.0015)
 
     else:
         delta_score = 0.5
 
-    # ── 成本评分 ──
     if is_sell:
         if strategy.strategy_type == "covered_call":
             cost_score = delta_score
@@ -648,7 +708,6 @@ def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
 
     liquidity_score = _liquidity_score(strategy)
 
-    # ── 权重合并 ──
     if is_sell:
         total_score = (
             0.35 * delta_score
@@ -677,6 +736,7 @@ def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
         "liquidity_score": round(liquidity_score, 4),
         "abs_delta":       round(abs_delta, 4) if abs_delta is not None else None,
         "is_sell":         is_sell,
+        "strike_forced":   leg_strike_forced,
     }
     if strategy.strategy_type in ("long_call", "long_put"):
         breakdown["vega_score"]  = round(vega_score, 4)
@@ -689,7 +749,6 @@ def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
 
 
 def _score_generic_strategy(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
-    """兜底：未命中任何专属 scorer 的策略。"""
     sell_legs = [l for l in strategy.legs if l.action == "SELL"]
     if sell_legs and sell_legs[0].delta is not None:
         diff = abs(abs(sell_legs[0].delta) - 0.30)
@@ -745,7 +804,7 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
         else:
             base_score, breakdown = _score_generic_strategy(strategy)
 
-        # ── 2. Greeks adjustment ──
+        # ── 2. Greeks结构调整（基于策略本身的Greeks质量）──
         greeks    = compute_strategy_net_greeks(strategy)
         net_delta = greeks.get("net_delta")
         net_vega  = greeks.get("net_vega")
@@ -775,7 +834,7 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
             if net_gamma is not None and net_gamma < -1.0:
                 adj *= 0.85
 
-        # iron追加极端vega/gamma adj（gamma用归一化值）
+        # iron追加极端vega/gamma adj
         if st in _IRON_TYPES:
             if net_vega is not None and net_vega < -0.30:
                 adj *= 0.75
@@ -784,23 +843,30 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
                 if gamma_per_day < -0.15:
                     adj *= 0.80
 
-        # ── 3. prior weight ──
+        # ── 3. Greeks意图调整（基于用户意图与实际Greeks的匹配度）──
+        greeks_preference = _extract_greeks_preference(strategy)
+        greeks_intent_adj = _calc_greeks_intent_adj(strategy, greeks_preference, greeks)
+
+        # ── 4. prior weight ──
         prior     = _extract_prior_weight(strategy)
         prior_adj = 0.7 + 0.3 * prior
 
-        # ── 4. final score ──
-        final_score = base_score * adj * prior_adj
+        # ── 5. final score ──
+        # 公式：base × greeks_adj × greeks_intent_adj × prior_adj
+        final_score = base_score * adj * greeks_intent_adj * prior_adj
 
-        breakdown["greeks_adj"] = round(adj, 4)
-        breakdown["prior"]      = round(prior, 4)
-        breakdown["prior_adj"]  = round(prior_adj, 4)
+        breakdown["greeks_adj"]        = round(adj, 4)
+        breakdown["greeks_intent_adj"] = round(greeks_intent_adj, 4)
+        breakdown["prior"]             = round(prior, 4)
+        breakdown["prior_adj"]         = round(prior_adj, 4)
 
         strategy.score           = round(final_score, 4)
         strategy.score_breakdown = breakdown
 
         print(
             f"[rank] {st:<22} base={base_score:.3f} "
-            f"adj={adj:.3f} prior={prior:.2f} final={final_score:.3f}"
+            f"adj={adj:.3f} intent_adj={greeks_intent_adj:.3f} "
+            f"prior={prior:.2f} final={final_score:.3f}"
         )
 
         ranked.append(strategy)

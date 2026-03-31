@@ -18,7 +18,10 @@ SYSTEM_PROMPT = """你是一个A股ETF期权交易意图解析器。
   "dte_min": 20,
   "dte_max": 45,
   "banned_strategies": [],
-  "preferred_strategies": []
+  "preferred_strategies": [],
+  "greeks_preference": {},
+  "price_levels": {},
+  "asymmetry": null
 }
 
 标的识别（可多个）：
@@ -66,7 +69,7 @@ dte_min/dte_max：
 - 中期/30到60天 → dte_min:30, dte_max:60
 - 未明确 → dte_min:20, dte_max:45
 
-banned_strategies：用户明确说不做某策略时填入，例如 ["call_calendar"]，否则 []
+banned_strategies：用户明确说不做某策略时填入，否则 []
 
 preferred_strategies：用户明确指定或强烈暗示某类策略时填入，否则 []
 - 备兑/备兑增收/covered call/卖备兑 → ["covered_call"]
@@ -79,7 +82,64 @@ preferred_strategies：用户明确指定或强烈暗示某类策略时填入，
 - 熊市价差/bear spread → ["bear_call_spread", "bear_put_spread"]
 - 买call/long call → ["long_call"]
 - 买put/long put → ["long_put"]
-- 未明确 → []"""
+- 未明确 → []
+
+greeks_preference：
+从用户描述中提取对delta/gamma/vega/theta的偏好，只输出用户明确表达了偏好的Greek。
+每个Greek格式为：{"sign": "positive"|"negative"|"neutral", "strength": 0.0-1.0}
+
+strength提取规则（从措辞强度判断）：
+- "肯定/明显/强烈/大概率/显著" → 0.8-1.0
+- "偏向/相对/可能/倾向" → 0.4-0.6
+- "略微/不排除/弱/稍微" → 0.1-0.3
+
+Greek映射规则：
+- delta（方向性）：
+  - 看涨/看多/上涨受益 → positive
+  - 看跌/看空/下跌受益 → negative
+  - 中性/无方向 → neutral
+- gamma（大幅波动受益）：
+  - 预期大幅波动/双向都可能动/行情会有大动作 → positive，strength根据措辞强度
+  - 震荡/窄幅/不会大动 → negative
+  - 未提及 → 不输出
+- vega（IV变化受益）：
+  - 预期波动率上升/iv会涨/市场恐慌 → positive
+  - 预期波动率下降/iv会跌/市场平静 → negative
+  - 未提及 → 不输出
+- theta（时间价值收益）：
+  - 卖方思维/收权利金/时间价值流逝受益 → positive
+  - 买方思维/时间不够/需要快速兑现 → negative
+  - 未提及 → 不输出
+
+示例：
+- "双向都可能动，但下行空间更大" →
+  {"gamma": {"sign": "positive", "strength": 0.8}, "delta": {"sign": "negative", "strength": 0.3}}
+- "震荡市，想收权利金" →
+  {"gamma": {"sign": "negative", "strength": 0.6}, "theta": {"sign": "positive", "strength": 0.7}}
+- "明显看多，波动率会上升" →
+  {"delta": {"sign": "positive", "strength": 0.9}, "vega": {"sign": "positive", "strength": 0.7}}
+
+price_levels：
+从用户描述中提取价格水平，用相对当前价的百分比表示（负数=下方，正数=上方）。
+只输出用户明确提到的价位，未提及的不输出。
+
+字段说明：
+- "support"：支撑位/保底位/下方关键位（例如"有-12%保底" → -0.12）
+- "resistance"：压力位/上方阻力（例如"上方8%有压力" → 0.08）
+- "target"：目标位/预期运行区间中点（例如"预计涨5%" → 0.05）
+
+示例：
+- "下跌空间有限，-10%有支撑" → {"support": -0.10}
+- "上方5%有压力，下方12%有保底" → {"resistance": 0.05, "support": -0.12}
+- "预计下跌8%左右" → {"target": -0.08}
+- 未提及任何价位 → {}
+
+asymmetry：
+描述用户预期的涨跌空间是否对称：
+- "上涨空间大/上行为主/偏多" → "upside"
+- "下跌空间大/下行为主/偏空但有保底" → "downside"
+- "双向对称/涨跌都可能且幅度相近" → "symmetric"
+- 未明确 → null"""
 
 
 def parse_with_llm(text: str) -> dict:
@@ -87,7 +147,7 @@ def parse_with_llm(text: str) -> dict:
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=512,
+            max_tokens=768,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": text}]
         )

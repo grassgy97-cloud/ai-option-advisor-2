@@ -39,21 +39,66 @@ HTML_PAGE = """<!DOCTYPE html>
   .input-row {
     display: flex;
     gap: 10px;
-    margin-bottom: 16px;
+    margin-bottom: 8px;
     align-items: flex-start;
   }
-  select {
+
+  /* 多选标的容器 */
+  .underlying-panel {
     background: #1e2130;
     border: 1px solid #2e3250;
-    color: #e0e0e0;
-    padding: 10px 12px;
     border-radius: 8px;
-    font-size: 14px;
+    padding: 8px 10px;
+    min-width: 160px;
+    max-width: 180px;
+    flex-shrink: 0;
+  }
+  .underlying-panel .panel-title {
+    font-size: 11px;
+    color: #6b7280;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .underlying-panel .panel-title a {
+    color: #4a6cf7;
     cursor: pointer;
-    height: 44px;
+    font-size: 11px;
+    text-decoration: none;
+  }
+  .underlying-panel .panel-title a:hover { text-decoration: underline; }
+  .underlying-panel label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #a0a8c0;
+    padding: 3px 0;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .underlying-panel label:hover { color: #e0e0e0; }
+  .underlying-panel input[type="checkbox"] {
+    accent-color: #4a6cf7;
+    width: 13px;
+    height: 13px;
+    cursor: pointer;
+  }
+  .underlying-panel .divider {
+    border: none;
+    border-top: 1px solid #2e3250;
+    margin: 6px 0;
+  }
+
+  .text-area-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
   textarea {
-    flex: 1;
+    width: 100%;
     background: #1e2130;
     border: 1px solid #2e3250;
     color: #e0e0e0;
@@ -61,11 +106,17 @@ HTML_PAGE = """<!DOCTYPE html>
     border-radius: 8px;
     font-size: 14px;
     resize: vertical;
-    min-height: 44px;
-    line-height: 1.5;
+    min-height: 80px;
+    line-height: 1.6;
     font-family: inherit;
   }
-  textarea:focus, select:focus {
+  .textarea-hint {
+    font-size: 11px;
+    color: #4b5568;
+    line-height: 1.5;
+    padding: 0 2px;
+  }
+  textarea:focus {
     outline: none;
     border-color: #4a6cf7;
   }
@@ -81,6 +132,7 @@ HTML_PAGE = """<!DOCTYPE html>
     cursor: pointer;
     white-space: nowrap;
     transition: background 0.15s;
+    align-self: flex-start;
   }
   button:hover { background: #3a5ce7; }
   button:disabled { background: #2e3250; color: #666; cursor: not-allowed; }
@@ -172,7 +224,6 @@ HTML_PAGE = """<!DOCTYPE html>
 
   /* intent badge */
   #intent-bar {
-    display: none;
     background: #1a1d2e;
     border: 1px solid #2e3250;
     border-radius: 8px;
@@ -180,7 +231,7 @@ HTML_PAGE = """<!DOCTYPE html>
     font-size: 12px;
     color: #8892b0;
     margin-bottom: 16px;
-    display: flex;
+    display: none;
     flex-wrap: wrap;
     gap: 12px;
   }
@@ -198,19 +249,40 @@ HTML_PAGE = """<!DOCTYPE html>
 <h1>📊 AI Option Advisor</h1>
 
 <div class="input-row">
-  <select id="underlying">
-    <option value="ALL">🔍 全部标的</option>
-    <option value="510300">510300 沪深300</option>
-    <option value="510050">510050 上证50</option>
-    <option value="510500">510500 中证500</option>
-    <option value="588000">588000 科创50(华夏)</option>
-    <option value="588080">588080 科创50(易方达)</option>
-    <option value="159915">159915 创业板</option>
-    <option value="159901">159901 深证100</option>
-    <option value="159919">159919 沪深300(深)</option>
-    <option value="159922">159922 中证500(深)</option>
-  </select>
-  <textarea id="text" rows="1" placeholder="输入你的市场观点，例如：近月认购偏贵，想做低风险跨期组合"></textarea>
+  <!-- 多选标的面板 -->
+  <div class="underlying-panel">
+    <div class="panel-title">
+      <span>选择标的</span>
+      <span>
+        <a onclick="selectAll()">全选</a>&nbsp;/&nbsp;<a onclick="clearAll()">清空</a>
+      </span>
+    </div>
+    <label><input type="checkbox" value="ALL" id="chk-ALL" onchange="toggleAll(this)"> 🔍 全部扫描</label>
+    <hr class="divider">
+    <label><input type="checkbox" value="510300" checked> 510300 沪深300</label>
+    <label><input type="checkbox" value="510050"> 510050 上证50</label>
+    <label><input type="checkbox" value="510500"> 510500 中证500</label>
+    <label><input type="checkbox" value="588000"> 588000 科创50华夏</label>
+    <label><input type="checkbox" value="588080"> 588080 科创50易方达</label>
+    <label><input type="checkbox" value="159915"> 159915 创业板</label>
+    <label><input type="checkbox" value="159901"> 159901 深证100</label>
+    <label><input type="checkbox" value="159919"> 159919 沪深300深</label>
+    <label><input type="checkbox" value="159922"> 159922 中证500深</label>
+  </div>
+
+  <!-- 文字输入区 -->
+  <div class="text-area-wrap">
+    <textarea id="text" rows="3" placeholder="输入你的市场观点…
+
+💡 提示：
+• 用百分比表达价位，例如「下方-8%有支撑」而不是「下方4.1」
+• 可描述方向、波动率、Greeks偏好，例如「偏空，双向波动可能大，下行更多」
+• 可指定策略，例如「做裸卖put，delta控制在0.18以内」"></textarea>
+    <div class="textarea-hint">
+      ⚠️ 价位请用相对百分比（如 -8%、+5%），勿用具体点位；支持描述方向、波动预期、保底位、压力位
+    </div>
+  </div>
+
   <button id="btn" onclick="runAdvisor()">分析</button>
 </div>
 
@@ -219,11 +291,12 @@ HTML_PAGE = """<!DOCTYPE html>
   <span class="shortcut" onclick="setShortcut('我觉得300近期会涨，想做方向性策略')">看多方向</span>
   <span class="shortcut" onclick="setShortcut('我持有300ETF现货想做备兑')">备兑增收</span>
   <span class="shortcut" onclick="setShortcut('整体波动率偏高，想收theta')">IV偏高卖方</span>
-  <span class="shortcut" onclick="setShortcut('沪深300和上证50近月认购都偏贵')">多标的跨期</span>
+  <span class="shortcut" onclick="setShortcut('双向波动可能大，下行空间更多，下方-8%有支撑')">非对称波动</span>
+  <span class="shortcut" onclick="setShortcut('偏空，下行空间大，上方+5%有压力')">偏空压力位</span>
 </div>
 
 <div id="status"></div>
-<div id="intent-bar" style="display:none"></div>
+<div id="intent-bar"></div>
 <div id="narrative"></div>
 <div class="table-wrap"><table id="result-table" style="display:none">
   <thead><tr>
@@ -238,35 +311,103 @@ function setShortcut(text) {
   document.getElementById('text').value = text;
 }
 
+function getSelectedUnderlyings() {
+  const allChk = document.getElementById('chk-ALL');
+  if (allChk.checked) return ['ALL'];
+  const checks = document.querySelectorAll('.underlying-panel input[type="checkbox"]:not(#chk-ALL):checked');
+  const vals = Array.from(checks).map(c => c.value);
+  return vals.length ? vals : ['510300'];
+}
+
+function toggleAll(el) {
+  const others = document.querySelectorAll('.underlying-panel input[type="checkbox"]:not(#chk-ALL)');
+  others.forEach(c => { c.checked = false; c.disabled = el.checked; });
+}
+
+function selectAll() {
+  document.getElementById('chk-ALL').checked = false;
+  const others = document.querySelectorAll('.underlying-panel input[type="checkbox"]:not(#chk-ALL)');
+  others.forEach(c => { c.checked = true; c.disabled = false; });
+}
+
+function clearAll() {
+  document.getElementById('chk-ALL').checked = false;
+  const others = document.querySelectorAll('.underlying-panel input[type="checkbox"]:not(#chk-ALL)');
+  others.forEach(c => { c.checked = false; c.disabled = false; });
+  // 默认保留510300
+  document.querySelector('input[value="510300"]').checked = true;
+}
+
 async function runAdvisor() {
   const text = document.getElementById('text').value.trim();
-  const underlying = document.getElementById('underlying').value;
   if (!text) return;
+
+  const selectedIds = getSelectedUnderlyings();
+  const isAll = selectedIds.includes('ALL');
+  const underlyingId = isAll ? 'ALL' : selectedIds[0];
+
+  // 多选非ALL时，把选中标的注入文字（让LLM感知到标的范围）
+  // 实际走的还是单标的循环，但前端把标的名称拼进text里辅助解析
+  let finalText = text;
+  if (!isAll && selectedIds.length > 1) {
+    const names = selectedIds.join('、');
+    finalText = `[标的：${names}] ${text}`;
+  }
 
   const btn = document.getElementById('btn');
   const status = document.getElementById('status');
   btn.disabled = true;
   status.className = 'loading';
-  const isAll = underlying === 'ALL';
-  status.textContent = isAll ? '全量分析中，预计需要60-120秒…' : '分析中…';
+  status.textContent = isAll
+    ? '全量分析中，预计需要60-120秒…'
+    : selectedIds.length > 1
+      ? `分析 ${selectedIds.length} 个标的，预计20-40秒…`
+      : '分析中…';
+
   document.getElementById('narrative').style.display = 'none';
   document.getElementById('result-table').style.display = 'none';
   document.getElementById('intent-bar').style.display = 'none';
   document.getElementById('result-body').innerHTML = '';
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 150000);  // 150秒超时
+  const timeoutId = setTimeout(() => controller.abort(), 200000);
 
   try {
-    const resp = await fetch('/advisor/run', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, underlying_id: underlying }),
-      signal: controller.signal,
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    renderResult(data.data || data);
+    const idsToRun = isAll ? ['ALL'] : selectedIds;
+
+    // 并行请求所有标的
+    const results = await Promise.all(idsToRun.map(async uid => {
+      const resp = await fetch('/advisor/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: finalText, underlying_id: uid }),
+        signal: controller.signal,
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      return data.data || data;
+    }));
+
+    let allRows = [];
+    let narrative = '';
+    let intentData = null;
+
+    for (const d of results) {
+      if (!intentData) intentData = d.parsed_intent;
+      const rows = (d.briefing || {}).table || [];
+      allRows = allRows.concat(rows);
+      if (!narrative && (d.briefing || {}).narrative) {
+        narrative = d.briefing.narrative;
+      }
+    }
+
+    // 多标的时按score重新排序取top10
+    if (idsToRun.length > 1) {
+      allRows.sort((a, b) => b.score - a.score);
+      allRows = allRows.slice(0, 10).map((r, i) => ({ ...r, rank: i + 1 }));
+    }
+
+    renderResult({ parsed_intent: intentData, briefing: { table: allRows, narrative } });
     status.className = '';
     status.textContent = '';
   } catch(e) {
@@ -279,19 +420,31 @@ async function runAdvisor() {
 }
 
 function renderResult(data) {
-  // intent bar
   const intent = data.parsed_intent || {};
   const intentBar = document.getElementById('intent-bar');
   intentBar.style.display = 'flex';
+
+  // 新字段展示
+  const gp = intent.greeks_preference || {};
+  const gpStr = Object.entries(gp).map(([k, v]) =>
+    `${k}:${v.sign === 'positive' ? '↑' : v.sign === 'negative' ? '↓' : '~'}(${v.strength})`
+  ).join(' ');
+  const pl = intent.price_levels || {};
+  const plStr = Object.entries(pl).map(([k, v]) =>
+    `${k}:${(v * 100).toFixed(1)}%`
+  ).join(' ');
+
   intentBar.innerHTML = `
-    <span>解析结果：</span>
+    <span>解析：</span>
     <span class="badge">market: ${intent.market_view || '-'}</span>
     <span class="badge">vol: ${intent.vol_view || '-'}</span>
     <span class="badge">标的: ${(intent.underlying_ids || [intent.underlying_id]).join(', ')}</span>
     <span class="badge">DTE: ${intent.dte_min}-${intent.dte_max}天</span>
+    ${gpStr ? `<span class="badge">Greeks: ${gpStr}</span>` : ''}
+    ${plStr ? `<span class="badge">价位: ${plStr}</span>` : ''}
+    ${intent.asymmetry ? `<span class="badge">偏态: ${intent.asymmetry}</span>` : ''}
   `;
 
-  // narrative
   const briefing = data.briefing || {};
   const narrativeEl = document.getElementById('narrative');
   if (briefing.narrative) {
@@ -299,16 +452,13 @@ function renderResult(data) {
     narrativeEl.textContent = briefing.narrative;
   }
 
-  // table
   const rows = briefing.table || [];
   if (!rows.length) return;
 
   const tbody = document.getElementById('result-body');
   tbody.innerHTML = rows.map((r, i) => {
     const scoreClass = r.score >= 0.8 ? 'score-high' : r.score >= 0.6 ? 'score-mid' : 'score-low';
-    const flags = (r.risk_flags || []).map(f =>
-      `<span class="flag">${f}</span>`
-    ).join('');
+    const flags = (r.risk_flags || []).map(f => `<span class="flag">${f}</span>`).join('');
     const greeks = `<div class="greeks">
       <span>Δ=${r.net_delta}</span>
       <span>V=${r.net_vega}</span>
@@ -330,7 +480,6 @@ function renderResult(data) {
   document.getElementById('result-table').style.display = 'table';
 }
 
-// 回车提交
 document.getElementById('text').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
