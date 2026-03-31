@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-
+import time
 # ==============================
 # 先验 IV 区间（六档锚点）
 # ==============================
@@ -263,18 +263,23 @@ def build_iv_percentile_report(
     underlying_id: str,
     lookback_days: int = 90,
 ) -> Optional[Dict[str, Any]]:
-    """
-    主入口：拉当前ATM IV + 历史序列 + 计算分位。
-    供 greeks_monitor.build_strategy_greeks_report 调用。
-    """
+    t0_all = time.perf_counter()
+
+    t0 = time.perf_counter()
     current_iv = get_current_atm_iv(engine, underlying_id)
+    print(f"[timing] {underlying_id} get_current_atm_iv = {time.perf_counter() - t0:.3f}s")
+
     if current_iv is None:
         print(f"[iv_percentile] 无法获取 {underlying_id} 的当前 ATM IV")
         return None
 
-    return calc_iv_percentile(
+    t0 = time.perf_counter()
+    rpt = calc_iv_percentile(
         current_iv=current_iv,
         underlying_id=underlying_id,
         engine=engine,
         lookback_days=lookback_days,
     )
+    print(f"[timing] {underlying_id} calc_iv_percentile = {time.perf_counter() - t0:.3f}s")
+    print(f"[timing] {underlying_id} build_iv_percentile_report total = {time.perf_counter() - t0_all:.3f}s")
+    return rpt

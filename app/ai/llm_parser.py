@@ -1,6 +1,9 @@
 import json
+import time
 from typing import Optional
+
 import anthropic
+
 from app.core.config import ANTHROPIC_API_KEY
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -148,17 +151,35 @@ asymmetry：
 - "双向对称/涨跌都可能且幅度相近" → "symmetric"
 - 未明确 → null"""
 
+def _extract_first_json_object(raw: str) -> str:
+    start = raw.find("{")
+    if start == -1:
+        raise ValueError("No JSON object start found")
+
+    depth = 0
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start:i + 1]
+
+    raise ValueError("No complete JSON object found")
 
 def parse_with_llm(
     text: str,
     market_context: Optional[dict] = None,
-) -> dict:
+) -> Optional[dict]:
     """
     调用 Claude API 解析自然语言意图，返回结构化dict。
 
     market_context: build_market_context_multi()的输出，格式为 {uid: ctx_dict}。
     拼入user message供LLM参考，用户意图仍然优先。
     """
+    t0 = time.perf_counter()
+
     user_message = text
 
     if market_context:
@@ -175,11 +196,17 @@ def parse_with_llm(
             model="claude-haiku-4-5-20251001",
             max_tokens=768,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}]
+            messages=[{"role": "user", "content": user_message}],
         )
         raw = response.content[0].text.strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(raw)
+        raw_json = _extract_first_json_object(raw)
+        parsed = json.loads(raw_json)
+
+        print(f"[timing] parse_with_llm total = {time.perf_counter() - t0:.3f}s")
+        return parsed
+
     except Exception as e:
         print(f"[llm_parser] 调用失败: {e}")
+        print(f"[timing] parse_with_llm failed after = {time.perf_counter() - t0:.3f}s")
         return None

@@ -287,17 +287,21 @@ def build_market_context(
     ctx["summary"] = _build_summary(ctx)
     return ctx
 
-
 def build_market_context_multi(
     engine: Engine,
     underlying_ids: List[str],
     iv_pcts: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """批量计算多个标的的市场背景，返回 {uid: ctx}。"""
     result = {}
+    t0_all = time.perf_counter()
+
     for uid in underlying_ids:
+        t0 = time.perf_counter()
         iv_pct = (iv_pcts or {}).get(uid)
         ctx = build_market_context(engine, uid, iv_pct=iv_pct)
+        print(f"[timing] {uid} build_market_context = {time.perf_counter() - t0:.3f}s")
         if ctx:
             result[uid] = ctx
+
+    print(f"[timing] build_market_context_multi total = {time.perf_counter() - t0_all:.3f}s")
     return result

@@ -5,12 +5,22 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 
+from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.models.schemas import ResolvedLeg, ResolvedStrategy, StrategyLegSpec, StrategySpec
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MarketSnapshot:
+    underlying_id: str
+    spot: float
+    factor_rows: List[Dict[str, Any]]
+    quote_rows: Dict[str, Dict[str, Any]]
+    merged_quotes: List[Dict[str, Any]]
 
 
 def _safe_float(x: Any, default: Optional[float] = None) -> Optional[float]:
@@ -167,6 +177,26 @@ def fetch_latest_spot(engine: Engine, underlying_id: str) -> float:
     return spot
 
 
+def load_market_snapshot(engine: Engine, underlying_id: str) -> MarketSnapshot:
+    factor_rows = fetch_latest_option_factors(engine, underlying_id)
+    quote_rows = fetch_latest_option_quotes(engine, underlying_id)
+    merged_quotes = merge_factor_and_quote_rows(factor_rows, quote_rows)
+
+    _OT_MAP = {"C": "CALL", "P": "PUT"}
+    for q in merged_quotes:
+        q["option_type"] = _OT_MAP.get(q.get("option_type", ""), q.get("option_type", ""))
+
+    spot = fetch_latest_spot(engine, underlying_id)
+
+    return MarketSnapshot(
+        underlying_id=underlying_id,
+        spot=spot,
+        factor_rows=factor_rows,
+        quote_rows=quote_rows,
+        merged_quotes=merged_quotes,
+    )
+
+
 def filter_quotes_for_constraints(
     quotes: list[dict],
     option_type: str | None = None,
@@ -285,11 +315,6 @@ def choose_by_strike_pct(
     spot: float,
     strike_pct: float,
 ) -> Optional[Dict[str, Any]]:
-    """
-    按用户指定的strike百分比（相对spot）选腿。
-    strike_pct为负表示下方（如-0.12表示spot×0.88），正表示上方。
-    找最近的合规strike合约。
-    """
     target_strike = spot * (1.0 + strike_pct)
     pool = [
         q for q in quotes
@@ -437,10 +462,6 @@ def build_resolved_leg(
     quantity: int = 1,
     strike_forced: bool = False,
 ) -> ResolvedLeg:
-    """
-    构造ResolvedLeg。
-    strike_forced=True时ranker会跳过该腿的delta评分。
-    """
     price = q.get("price")
     if price is None:
         price = q.get("option_market_price")
@@ -449,9 +470,12 @@ def build_resolved_leg(
     ask = q.get("ask_price1")
     mid = q.get("mid_price")
 
-    if bid is None: bid = price
-    if ask is None: ask = price
-    if mid is None: mid = price
+    if bid is None:
+        bid = price
+    if ask is None:
+        ask = price
+    if mid is None:
+        mid = price
 
     iv = q.get("iv")
     if iv is None:
@@ -490,9 +514,6 @@ def _choose_leg_quote(
     expiry: date,
     spot: float,
 ) -> Optional[Dict[str, Any]]:
-    """
-    统一选腿入口：有strike_pct_target时按百分比选，否则按delta_target选。
-    """
     if leg_spec.strike_pct_target is not None:
         return choose_by_strike_pct(
             quotes=quotes,
@@ -560,19 +581,15 @@ def _filter_quotes_for_leg(
     )
 
 
-def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[ResolvedStrategy]:
+def resolve_strategy_from_snapshot(
+    snapshot: MarketSnapshot,
+    strategy: StrategySpec,
+) -> Optional[ResolvedStrategy]:
     if strategy.strategy_type in ("iron_condor", "iron_fly"):
-        return _resolve_iron_structure(engine, strategy)
+        return _resolve_iron_structure_from_snapshot(snapshot, strategy)
 
-    factor_rows = fetch_latest_option_factors(engine, strategy.underlying_id)
-    quote_rows = fetch_latest_option_quotes(engine, strategy.underlying_id)
-    quotes = merge_factor_and_quote_rows(factor_rows, quote_rows)
-
-    _OT_MAP = {"C": "CALL", "P": "PUT"}
-    for q in quotes:
-        q["option_type"] = _OT_MAP.get(q.get("option_type", ""), q.get("option_type", ""))
-
-    spot = fetch_latest_spot(engine, strategy.underlying_id)
+    quotes = snapshot.merged_quotes
+    spot = snapshot.spot
 
     logger.debug(f"[resolver] total quotes = {len(quotes)}")
     logger.debug(f"[resolver] strategy_type = {strategy.strategy_type}")
@@ -607,18 +624,21 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
         calendar_second_filtered = _filter_quotes_for_leg(quotes, strategy, second_leg_spec, 1)
         calendar_second_grouped = group_by_expiry(calendar_second_filtered)
         calendar_second_expiry = choose_expiry(
-            calendar_second_grouped, second_leg_spec.expiry_rule, reference_expiry=first_expiry,
+            calendar_second_grouped,
+            second_leg_spec.expiry_rule,
+            reference_expiry=first_expiry,
         )
         logger.debug(f"[resolver] preview second_expiry = {calendar_second_expiry}")
         if calendar_second_expiry is None:
             return None
         first_leg_quote = choose_calendar_near_leg(
-            near_quotes=first_filtered, far_quotes=calendar_second_filtered,
+            near_quotes=first_filtered,
+            far_quotes=calendar_second_filtered,
             option_type=first_leg_spec.option_type,
-            near_expiry=first_expiry, far_expiry=calendar_second_expiry, spot=spot,
+            near_expiry=first_expiry,
+            far_expiry=calendar_second_expiry,
+            spot=spot,
         )
-    elif strategy.strategy_type in ("diagonal_call", "diagonal_put"):
-        first_leg_quote = _choose_leg_quote(first_filtered, first_leg_spec, first_expiry, spot)
     else:
         first_leg_quote = _choose_leg_quote(first_filtered, first_leg_spec, first_expiry, spot)
 
@@ -639,7 +659,6 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
         logger.debug(f"[resolver] second leg dte range = {second_dte_min} ~ {second_dte_max}")
 
         if strategy.strategy_type in ("bear_call_spread", "bull_put_spread", "bull_call_spread", "bear_put_spread"):
-            # vertical的第二腿：有strike_pct_target时直接按百分比选，否则按原逻辑
             if second_leg_spec.strike_pct_target is not None:
                 second_leg_quote = choose_by_strike_pct(
                     quotes=first_filtered,
@@ -650,7 +669,8 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
                 )
             else:
                 second_leg_quote = choose_vertical_buy_leg(
-                    quotes=first_filtered, first_leg=first_leg_quote,
+                    quotes=first_filtered,
+                    first_leg=first_leg_quote,
                     strategy_type=strategy.strategy_type,
                     delta_target=second_leg_spec.delta_target,
                 )
@@ -665,7 +685,9 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
                     return None
                 second_grouped = group_by_expiry(second_filtered)
                 second_expiry = choose_expiry(
-                    second_grouped, second_leg_spec.expiry_rule, reference_expiry=first_expiry
+                    second_grouped,
+                    second_leg_spec.expiry_rule,
+                    reference_expiry=first_expiry,
                 )
 
             logger.debug(f"[resolver] second_expiry = {second_expiry}")
@@ -674,17 +696,18 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
 
             if strategy.strategy_type in ("call_calendar", "put_calendar"):
                 second_leg_quote = choose_same_strike_leg(
-                    second_filtered, option_type=second_leg_spec.option_type,
-                    expiry=second_expiry, strike=first_leg_quote["strike"],
+                    second_filtered,
+                    option_type=second_leg_spec.option_type,
+                    expiry=second_expiry,
+                    strike=first_leg_quote["strike"],
                     delta_target=second_leg_spec.delta_target,
-                )
-            elif strategy.strategy_type in ("diagonal_call", "diagonal_put"):
-                second_leg_quote = _choose_leg_quote(
-                    second_filtered, second_leg_spec, second_expiry, spot
                 )
             else:
                 second_leg_quote = _choose_leg_quote(
-                    second_filtered, second_leg_spec, second_expiry, spot
+                    second_filtered,
+                    second_leg_spec,
+                    second_expiry,
+                    spot,
                 )
 
         logger.debug(f"[resolver] second_leg_quote found = {second_leg_quote is not None}")
@@ -713,16 +736,17 @@ def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[Resolve
     )
 
 
-def _resolve_iron_structure(engine: Engine, strategy: StrategySpec) -> Optional[ResolvedStrategy]:
-    factor_rows = fetch_latest_option_factors(engine, strategy.underlying_id)
-    quote_rows = fetch_latest_option_quotes(engine, strategy.underlying_id)
-    quotes = merge_factor_and_quote_rows(factor_rows, quote_rows)
+def resolve_strategy(engine: Engine, strategy: StrategySpec) -> Optional[ResolvedStrategy]:
+    snapshot = load_market_snapshot(engine, strategy.underlying_id)
+    return resolve_strategy_from_snapshot(snapshot, strategy)
 
-    _OT_MAP = {"C": "CALL", "P": "PUT"}
-    for q in quotes:
-        q["option_type"] = _OT_MAP.get(q.get("option_type", ""), q.get("option_type", ""))
 
-    spot = fetch_latest_spot(engine, strategy.underlying_id)
+def _resolve_iron_structure_from_snapshot(
+    snapshot: MarketSnapshot,
+    strategy: StrategySpec,
+) -> Optional[ResolvedStrategy]:
+    quotes = snapshot.merged_quotes
+    spot = snapshot.spot
 
     if not quotes:
         return None
@@ -751,23 +775,31 @@ def _resolve_iron_structure(engine: Engine, strategy: StrategySpec) -> Optional[
 
     if strategy.strategy_type == "iron_condor":
         call_sell = choose_by_delta_target(calls, 0.30)
-        put_sell  = choose_by_delta_target(puts,  0.30)
-        call_buy  = choose_by_delta_target([q for q in calls if q["strike"] > call_sell["strike"]], 0.15) if call_sell else None
-        put_buy   = choose_by_delta_target([q for q in puts  if q["strike"] < put_sell["strike"]],  0.15) if put_sell  else None
-    else:  # iron_fly
+        put_sell = choose_by_delta_target(puts, 0.30)
+        call_buy = choose_by_delta_target(
+            [q for q in calls if q["strike"] > call_sell["strike"]], 0.15
+        ) if call_sell else None
+        put_buy = choose_by_delta_target(
+            [q for q in puts if q["strike"] < put_sell["strike"]], 0.15
+        ) if put_sell else None
+    else:
         call_sell = choose_by_delta_target(calls, 0.50)
-        put_sell  = choose_by_delta_target(puts,  0.50)
-        call_buy  = choose_by_delta_target([q for q in calls if q["strike"] > call_sell["strike"]], 0.20) if call_sell else None
-        put_buy   = choose_by_delta_target([q for q in puts  if q["strike"] < put_sell["strike"]],  0.20) if put_sell  else None
+        put_sell = choose_by_delta_target(puts, 0.50)
+        call_buy = choose_by_delta_target(
+            [q for q in calls if q["strike"] > call_sell["strike"]], 0.20
+        ) if call_sell else None
+        put_buy = choose_by_delta_target(
+            [q for q in puts if q["strike"] < put_sell["strike"]], 0.20
+        ) if put_sell else None
 
     if not all([call_sell, call_buy, put_sell, put_buy]):
         return None
 
     legs = [
         build_resolved_leg(call_sell, "SELL"),
-        build_resolved_leg(call_buy,  "BUY"),
-        build_resolved_leg(put_sell,  "SELL"),
-        build_resolved_leg(put_buy,   "BUY"),
+        build_resolved_leg(call_buy, "BUY"),
+        build_resolved_leg(put_sell, "SELL"),
+        build_resolved_leg(put_buy, "BUY"),
     ]
 
     net_premium, net_credit, net_debit = calc_net_premium(legs)
@@ -783,3 +815,8 @@ def _resolve_iron_structure(engine: Engine, strategy: StrategySpec) -> Optional[
         rationale=strategy.rationale,
         metadata={"source": "strategy_resolver", "strategy_metadata": strategy.metadata},
     )
+
+
+def _resolve_iron_structure(engine: Engine, strategy: StrategySpec) -> Optional[ResolvedStrategy]:
+    snapshot = load_market_snapshot(engine, strategy.underlying_id)
+    return _resolve_iron_structure_from_snapshot(snapshot, strategy)

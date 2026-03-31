@@ -159,19 +159,22 @@ def build_greeks_commentary(
 def build_strategy_greeks_report(
     strategy: ResolvedStrategy,
     engine: Optional[Engine] = None,
+    iv_pct_report: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     生成策略 Greeks 报告。
 
-    engine 参数可选：
-      - 传入 engine → 附带 IV percentile 报告
-      - 不传 → 跳过 IV percentile（向后兼容）
+    参数说明：
+      - iv_pct_report：若外部已预先算好 IV percentile，直接传入，避免重复查库
+      - engine：仅在 iv_pct_report 未提供时，才会尝试现算（兼容旧调用）
     """
-    # IV percentile（需要 engine）
-    iv_pct_report = None
-    if engine is not None:
+    # 优先使用外部传入的 iv_pct_report，避免重复查库
+    final_iv_pct_report = iv_pct_report
+
+    # 仅在外部未传入时，才回退到旧逻辑
+    if final_iv_pct_report is None and engine is not None:
         try:
-            iv_pct_report = build_iv_percentile_report(
+            final_iv_pct_report = build_iv_percentile_report(
                 engine=engine,
                 underlying_id=strategy.underlying_id,
             )
@@ -184,14 +187,16 @@ def build_strategy_greeks_report(
         "spot_price": strategy.spot_price,
         "net_greeks": compute_strategy_net_greeks(strategy),
         "risk_flags": build_risk_flags(strategy),
-        "commentary": build_greeks_commentary(strategy, iv_pct_report),
+        "commentary": build_greeks_commentary(strategy, final_iv_pct_report),
     }
 
-    if strategy.strategy_type in ("call_calendar", "put_calendar",
-                                   "diagonal_call", "diagonal_put"):
+    if strategy.strategy_type in (
+        "call_calendar", "put_calendar",
+        "diagonal_call", "diagonal_put",
+    ):
         report["term_structure"] = build_calendar_term_structure(strategy)
 
-    if iv_pct_report is not None:
-        report["iv_percentile"] = iv_pct_report
+    if final_iv_pct_report is not None:
+        report["iv_percentile"] = final_iv_pct_report
 
     return report
