@@ -1,0 +1,874 @@
+[
+  {
+    "name": "bearish_call_rich_defined_risk",
+    "elapsed_sec": 24.54,
+    "passed": true,
+    "errors": [],
+    "parsed_intent": {
+      "underlying_id": "510300",
+      "underlying_ids": [
+        "510300"
+      ],
+      "market_view": "bearish",
+      "vol_view": "call_iv_rich",
+      "risk_preference": "low",
+      "defined_risk_only": true,
+      "prefer_multi_leg": true,
+      "dte_min": 20,
+      "dte_max": 45,
+      "allowed_strategies": [
+        "bear_call_spread",
+        "bear_put_spread",
+        "iron_condor"
+      ],
+      "banned_strategies": [],
+      "greeks_preference": {
+        "delta": {
+          "sign": "negative",
+          "strength": 0.315
+        },
+        "theta": {
+          "sign": "positive",
+          "strength": 0.547
+        }
+      },
+      "price_levels": {},
+      "asymmetry": "downside"
+    },
+    "top5": [
+      {
+        "strategy_type": "bear_call_spread",
+        "underlying_id": "510300",
+        "score": 0.7876,
+        "net_credit": 0.022199999999999998,
+        "net_debit": null,
+        "net_delta": -0.190016,
+        "net_vega": -0.001389,
+        "net_theta": 0.000472,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "bear_put_spread",
+        "underlying_id": "510300",
+        "score": 0.6893,
+        "net_credit": null,
+        "net_debit": 0.02855,
+        "net_delta": -0.166321,
+        "net_vega": 0.000793,
+        "net_theta": -0.000188,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      },
+      {
+        "strategy_type": "iron_condor",
+        "underlying_id": "510300",
+        "score": 0.6718,
+        "net_credit": 0.037149999999999996,
+        "net_debit": null,
+        "net_delta": -0.083856,
+        "net_vega": -0.002384,
+        "net_theta": 0.000808,
+        "risk_flags": [
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "call_calendar",
+        "underlying_id": "510300",
+        "score": 0.633,
+        "net_credit": null,
+        "net_debit": 0.0402,
+        "net_delta": -0.022154,
+        "net_vega": 0.002745,
+        "net_theta": 0.000553,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      },
+      {
+        "strategy_type": "diagonal_call",
+        "underlying_id": "510300",
+        "score": 0.5249,
+        "net_credit": null,
+        "net_debit": 0.03990000000000001,
+        "net_delta": 0.074396,
+        "net_vega": 0.002929,
+        "net_theta": 0.000456,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "bullish_put_rich_defined_risk",
+    "elapsed_sec": 16.461,
+    "passed": true,
+    "errors": [],
+    "parsed_intent": {
+      "underlying_id": "510300",
+      "underlying_ids": [
+        "510300"
+      ],
+      "market_view": "bullish",
+      "vol_view": "put_iv_rich",
+      "risk_preference": "low",
+      "defined_risk_only": true,
+      "prefer_multi_leg": true,
+      "dte_min": 20,
+      "dte_max": 45,
+      "allowed_strategies": [
+        "bull_call_spread",
+        "bull_put_spread",
+        "call_calendar"
+      ],
+      "banned_strategies": [],
+      "greeks_preference": {
+        "delta": {
+          "sign": "positive",
+          "strength": 0.195
+        },
+        "theta": {
+          "sign": "positive",
+          "strength": 0.037
+        }
+      },
+      "price_levels": {},
+      "asymmetry": null
+    },
+    "top5": [
+      {
+        "strategy_type": "bull_put_spread",
+        "underlying_id": "510300",
+        "score": 0.7876,
+        "net_credit": 0.014949999999999998,
+        "net_debit": null,
+        "net_delta": 0.10616,
+        "net_vega": -0.000995,
+        "net_theta": 0.000336,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "bull_call_spread",
+        "underlying_id": "510300",
+        "score": 0.718,
+        "net_credit": null,
+        "net_debit": 0.0468,
+        "net_delta": 0.255103,
+        "net_vega": 0.000165,
+        "net_theta": -0.000114,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      },
+      {
+        "strategy_type": "diagonal_call",
+        "underlying_id": "510300",
+        "score": 0.6503,
+        "net_credit": null,
+        "net_debit": 0.03990000000000001,
+        "net_delta": 0.074396,
+        "net_vega": 0.002929,
+        "net_theta": 0.000456,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      },
+      {
+        "strategy_type": "bear_put_spread",
+        "underlying_id": "510300",
+        "score": 0.587,
+        "net_credit": null,
+        "net_debit": 0.02855,
+        "net_delta": -0.166321,
+        "net_vega": 0.000793,
+        "net_theta": -0.000188,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      },
+      {
+        "strategy_type": "call_calendar",
+        "underlying_id": "510300",
+        "score": 0.5515,
+        "net_credit": null,
+        "net_debit": 0.0402,
+        "net_delta": -0.022154,
+        "net_vega": 0.002745,
+        "net_theta": 0.000553,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "neutral_high_iv_theta_positive",
+    "elapsed_sec": 17.644,
+    "passed": true,
+    "errors": [],
+    "parsed_intent": {
+      "underlying_id": "510300",
+      "underlying_ids": [
+        "510300"
+      ],
+      "market_view": "neutral",
+      "vol_view": "iv_high",
+      "risk_preference": "low",
+      "defined_risk_only": true,
+      "prefer_multi_leg": true,
+      "dte_min": 20,
+      "dte_max": 45,
+      "allowed_strategies": [
+        "iron_condor",
+        "bull_put_spread",
+        "bear_call_spread"
+      ],
+      "banned_strategies": [],
+      "greeks_preference": {
+        "gamma": {
+          "sign": "negative",
+          "strength": 0.7
+        },
+        "theta": {
+          "sign": "positive",
+          "strength": 0.718
+        },
+        "delta": {
+          "sign": "negative",
+          "strength": 0.06
+        }
+      },
+      "price_levels": {},
+      "asymmetry": null
+    },
+    "top5": [
+      {
+        "strategy_type": "bear_call_spread",
+        "underlying_id": "510300",
+        "score": 0.7876,
+        "net_credit": 0.022199999999999998,
+        "net_debit": null,
+        "net_delta": -0.190016,
+        "net_vega": -0.001389,
+        "net_theta": 0.000472,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "bull_put_spread",
+        "underlying_id": "510300",
+        "score": 0.7732,
+        "net_credit": 0.014949999999999998,
+        "net_debit": null,
+        "net_delta": 0.10616,
+        "net_vega": -0.000995,
+        "net_theta": 0.000336,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "iron_condor",
+        "underlying_id": "510300",
+        "score": 0.6759,
+        "net_credit": 0.037149999999999996,
+        "net_debit": null,
+        "net_delta": -0.083856,
+        "net_vega": -0.002384,
+        "net_theta": 0.000808,
+        "risk_flags": [
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "call_calendar",
+        "underlying_id": "510300",
+        "score": 0.633,
+        "net_credit": null,
+        "net_debit": 0.0402,
+        "net_delta": -0.022154,
+        "net_vega": 0.002745,
+        "net_theta": 0.000553,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      },
+      {
+        "strategy_type": "diagonal_call",
+        "underlying_id": "510300",
+        "score": 0.6167,
+        "net_credit": null,
+        "net_debit": 0.03990000000000001,
+        "net_delta": 0.074396,
+        "net_vega": 0.002929,
+        "net_theta": 0.000456,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "big_move_uncertain_direction",
+    "elapsed_sec": 14.234,
+    "passed": true,
+    "errors": [],
+    "parsed_intent": {
+      "underlying_id": "510300",
+      "underlying_ids": [
+        "510300"
+      ],
+      "market_view": "neutral",
+      "vol_view": "none",
+      "risk_preference": "low",
+      "defined_risk_only": true,
+      "prefer_multi_leg": true,
+      "dte_min": 20,
+      "dte_max": 45,
+      "allowed_strategies": null,
+      "banned_strategies": [],
+      "greeks_preference": {
+        "gamma": {
+          "sign": "positive",
+          "strength": 0.9
+        },
+        "delta": {
+          "sign": "negative",
+          "strength": 0.06
+        },
+        "theta": {
+          "sign": "positive",
+          "strength": 0.037
+        }
+      },
+      "price_levels": {},
+      "asymmetry": null
+    },
+    "top5": [
+      {
+        "strategy_type": "long_call",
+        "underlying_id": "510300",
+        "score": 0.7048,
+        "net_credit": null,
+        "net_debit": 0.07500000000000001,
+        "net_delta": 0.423517,
+        "net_vega": 0.006954,
+        "net_theta": -0.00095,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      },
+      {
+        "strategy_type": "long_put",
+        "underlying_id": "510300",
+        "score": 0.6503,
+        "net_credit": null,
+        "net_debit": 0.16655,
+        "net_delta": -0.549195,
+        "net_vega": 0.007031,
+        "net_theta": -0.001098,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      },
+      {
+        "strategy_type": "diagonal_call",
+        "underlying_id": "510300",
+        "score": 0.4711,
+        "net_credit": null,
+        "net_debit": 0.03990000000000001,
+        "net_delta": 0.074396,
+        "net_vega": 0.002929,
+        "net_theta": 0.000456,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      },
+      {
+        "strategy_type": "iron_condor",
+        "underlying_id": "510300",
+        "score": 0.429,
+        "net_credit": 0.037149999999999996,
+        "net_debit": null,
+        "net_delta": -0.083856,
+        "net_vega": -0.002384,
+        "net_theta": 0.000808,
+        "risk_flags": [
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "iron_fly",
+        "underlying_id": "510300",
+        "score": 0.3672,
+        "net_credit": 0.09755,
+        "net_debit": null,
+        "net_delta": -0.278798,
+        "net_vega": -0.002347,
+        "net_theta": 0.000774,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "bearish_vega_positive",
+    "elapsed_sec": 15.567,
+    "passed": true,
+    "errors": [],
+    "parsed_intent": {
+      "underlying_id": "510300",
+      "underlying_ids": [
+        "510300"
+      ],
+      "market_view": "bearish",
+      "vol_view": "iv_high",
+      "risk_preference": "low",
+      "defined_risk_only": true,
+      "prefer_multi_leg": false,
+      "dte_min": 20,
+      "dte_max": 45,
+      "allowed_strategies": [
+        "long_put",
+        "bear_put_spread"
+      ],
+      "banned_strategies": [],
+      "greeks_preference": {
+        "delta": {
+          "sign": "negative",
+          "strength": 0.655
+        },
+        "vega": {
+          "sign": "positive",
+          "strength": 0.8
+        },
+        "theta": {
+          "sign": "negative",
+          "strength": 0.473
+        }
+      },
+      "price_levels": {},
+      "asymmetry": "downside"
+    },
+    "top5": [
+      {
+        "strategy_type": "bear_put_spread",
+        "underlying_id": "510300",
+        "score": 0.9191,
+        "net_credit": null,
+        "net_debit": 0.02855,
+        "net_delta": -0.166321,
+        "net_vega": 0.000793,
+        "net_theta": -0.000188,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      },
+      {
+        "strategy_type": "long_put",
+        "underlying_id": "510300",
+        "score": 0.6935,
+        "net_credit": null,
+        "net_debit": 0.16655,
+        "net_delta": -0.549195,
+        "net_vega": 0.007031,
+        "net_theta": -0.001098,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      },
+      {
+        "strategy_type": "long_call",
+        "underlying_id": "510300",
+        "score": 0.6143,
+        "net_credit": null,
+        "net_debit": 0.07500000000000001,
+        "net_delta": 0.423517,
+        "net_vega": 0.006954,
+        "net_theta": -0.00095,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      },
+      {
+        "strategy_type": "call_calendar",
+        "underlying_id": "510300",
+        "score": 0.5631,
+        "net_credit": null,
+        "net_debit": 0.0402,
+        "net_delta": -0.022154,
+        "net_vega": 0.002745,
+        "net_theta": 0.000553,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      },
+      {
+        "strategy_type": "bear_call_spread",
+        "underlying_id": "510300",
+        "score": 0.5085,
+        "net_credit": 0.022199999999999998,
+        "net_debit": null,
+        "net_delta": -0.190016,
+        "net_vega": -0.001389,
+        "net_theta": 0.000472,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "vega_negative_theta_positive",
+    "elapsed_sec": 19.392,
+    "passed": true,
+    "errors": [],
+    "parsed_intent": {
+      "underlying_id": "510300",
+      "underlying_ids": [
+        "510300"
+      ],
+      "market_view": "neutral",
+      "vol_view": "iv_high",
+      "risk_preference": "low",
+      "defined_risk_only": true,
+      "prefer_multi_leg": true,
+      "dte_min": 20,
+      "dte_max": 45,
+      "allowed_strategies": [
+        "iron_condor",
+        "call_calendar",
+        "put_calendar",
+        "covered_call"
+      ],
+      "banned_strategies": [],
+      "greeks_preference": {
+        "gamma": {
+          "sign": "negative",
+          "strength": 0.7
+        },
+        "theta": {
+          "sign": "positive",
+          "strength": 0.718
+        },
+        "vega": {
+          "sign": "negative",
+          "strength": 0.6
+        },
+        "delta": {
+          "sign": "negative",
+          "strength": 0.06
+        }
+      },
+      "price_levels": {},
+      "asymmetry": null
+    },
+    "top5": [
+      {
+        "strategy_type": "covered_call",
+        "underlying_id": "510300",
+        "score": 0.97,
+        "net_credit": 0.0341,
+        "net_debit": null,
+        "net_delta": -0.182485,
+        "net_vega": -0.005757,
+        "net_theta": 0.000593,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "bear_call_spread",
+        "underlying_id": "510300",
+        "score": 0.7389,
+        "net_credit": 0.022199999999999998,
+        "net_debit": null,
+        "net_delta": -0.190016,
+        "net_vega": -0.001389,
+        "net_theta": 0.000472,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "bull_put_spread",
+        "underlying_id": "510300",
+        "score": 0.7293,
+        "net_credit": 0.014949999999999998,
+        "net_debit": null,
+        "net_delta": 0.10616,
+        "net_vega": -0.000995,
+        "net_theta": 0.000336,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "iron_condor",
+        "underlying_id": "510300",
+        "score": 0.6925,
+        "net_credit": 0.037149999999999996,
+        "net_debit": null,
+        "net_delta": -0.083856,
+        "net_vega": -0.002384,
+        "net_theta": 0.000808,
+        "risk_flags": [
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "call_calendar",
+        "underlying_id": "510300",
+        "score": 0.6398,
+        "net_credit": null,
+        "net_debit": 0.0402,
+        "net_delta": -0.022154,
+        "net_vega": 0.002745,
+        "net_theta": 0.000553,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "covered_call_preferred",
+    "elapsed_sec": 15.185,
+    "passed": true,
+    "errors": [],
+    "parsed_intent": {
+      "underlying_id": "510300",
+      "underlying_ids": [
+        "510300"
+      ],
+      "market_view": "neutral",
+      "vol_view": "put_iv_rich",
+      "risk_preference": "low",
+      "defined_risk_only": false,
+      "prefer_multi_leg": false,
+      "dte_min": 20,
+      "dte_max": 45,
+      "allowed_strategies": [
+        "covered_call"
+      ],
+      "banned_strategies": [],
+      "greeks_preference": {
+        "theta": {
+          "sign": "positive",
+          "strength": 0.718
+        },
+        "delta": {
+          "sign": "neutral",
+          "strength": 0.365
+        }
+      },
+      "price_levels": {},
+      "asymmetry": null
+    },
+    "top5": [
+      {
+        "strategy_type": "covered_call",
+        "underlying_id": "510300",
+        "score": 0.97,
+        "net_credit": 0.0341,
+        "net_debit": null,
+        "net_delta": -0.182485,
+        "net_vega": -0.005757,
+        "net_theta": 0.000593,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "bull_put_spread",
+        "underlying_id": "510300",
+        "score": 0.7389,
+        "net_credit": 0.014949999999999998,
+        "net_debit": null,
+        "net_delta": 0.10616,
+        "net_vega": -0.000995,
+        "net_theta": 0.000336,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "naked_put",
+        "underlying_id": "510300",
+        "score": 0.6763,
+        "net_credit": 0.0175,
+        "net_debit": null,
+        "net_delta": 0.142669,
+        "net_vega": -0.002452,
+        "net_theta": 0.00123,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "call_calendar",
+        "underlying_id": "510300",
+        "score": 0.6216,
+        "net_credit": null,
+        "net_debit": 0.0402,
+        "net_delta": -0.022154,
+        "net_vega": 0.002745,
+        "net_theta": 0.000553,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      },
+      {
+        "strategy_type": "diagonal_call",
+        "underlying_id": "510300",
+        "score": 0.6171,
+        "net_credit": null,
+        "net_debit": 0.03990000000000001,
+        "net_delta": 0.074396,
+        "net_vega": 0.002929,
+        "net_theta": 0.000456,
+        "risk_flags": [
+          "short_gamma",
+          "term_signal_weak"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "ban_calendar_and_diagonal",
+    "elapsed_sec": 16.166,
+    "passed": true,
+    "errors": [],
+    "parsed_intent": {
+      "underlying_id": "510300",
+      "underlying_ids": [
+        "510300"
+      ],
+      "market_view": "bearish",
+      "vol_view": "call_iv_rich",
+      "risk_preference": "low",
+      "defined_risk_only": false,
+      "prefer_multi_leg": true,
+      "dte_min": 20,
+      "dte_max": 45,
+      "allowed_strategies": null,
+      "banned_strategies": [
+        "call_calendar",
+        "put_calendar",
+        "diagonal_call",
+        "diagonal_put"
+      ],
+      "greeks_preference": {
+        "delta": {
+          "sign": "negative",
+          "strength": 0.57
+        },
+        "theta": {
+          "sign": "positive",
+          "strength": 0.462
+        }
+      },
+      "price_levels": {},
+      "asymmetry": "downside"
+    },
+    "top5": [
+      {
+        "strategy_type": "bear_call_spread",
+        "underlying_id": "510300",
+        "score": 0.7876,
+        "net_credit": 0.022199999999999998,
+        "net_debit": null,
+        "net_delta": -0.190016,
+        "net_vega": -0.001389,
+        "net_theta": 0.000472,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "bear_put_spread",
+        "underlying_id": "510300",
+        "score": 0.7321,
+        "net_credit": null,
+        "net_debit": 0.02855,
+        "net_delta": -0.166321,
+        "net_vega": 0.000793,
+        "net_theta": -0.000188,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      },
+      {
+        "strategy_type": "naked_call",
+        "underlying_id": "510300",
+        "score": 0.7071,
+        "net_credit": 0.0129,
+        "net_debit": null,
+        "net_delta": -0.159105,
+        "net_vega": -0.002636,
+        "net_theta": 0.000934,
+        "risk_flags": [
+          "delta_not_neutral",
+          "short_gamma"
+        ]
+      },
+      {
+        "strategy_type": "long_put",
+        "underlying_id": "510300",
+        "score": 0.5195,
+        "net_credit": null,
+        "net_debit": 0.16655,
+        "net_delta": -0.549195,
+        "net_vega": 0.007031,
+        "net_theta": -0.001098,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      },
+      {
+        "strategy_type": "bull_call_spread",
+        "underlying_id": "510300",
+        "score": 0.4905,
+        "net_credit": null,
+        "net_debit": 0.0468,
+        "net_delta": 0.255103,
+        "net_vega": 0.000165,
+        "net_theta": -0.000114,
+        "risk_flags": [
+          "delta_not_neutral"
+        ]
+      }
+    ]
+  }
+]

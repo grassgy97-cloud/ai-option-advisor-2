@@ -2,11 +2,13 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from app.api.advisor_v2 import router as advisor_router
 from app.api.scanner_v2 import router as scanner_router
+from app.api.covered_call_api import router as covered_call_router
 
 app = FastAPI(title="AI Option Advisor")
 
 app.include_router(advisor_router)
 app.include_router(scanner_router)
+app.include_router(covered_call_router)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -43,7 +45,6 @@ HTML_PAGE = """<!DOCTYPE html>
     align-items: flex-start;
   }
 
-  /* 多选标的容器 */
   .underlying-panel {
     background: #1e2130;
     border: 1px solid #2e3250;
@@ -120,6 +121,13 @@ HTML_PAGE = """<!DOCTYPE html>
     outline: none;
     border-color: #4a6cf7;
   }
+
+  .button-col {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-self: flex-start;
+  }
   button {
     background: #4a6cf7;
     color: #fff;
@@ -136,8 +144,13 @@ HTML_PAGE = """<!DOCTYPE html>
   }
   button:hover { background: #3a5ce7; }
   button:disabled { background: #2e3250; color: #666; cursor: not-allowed; }
+  #btn-covered {
+    background: #1f8f5f;
+  }
+  #btn-covered:hover {
+    background: #18724c;
+  }
 
-  /* 快捷输入 */
   .shortcuts {
     display: flex;
     flex-wrap: wrap;
@@ -156,7 +169,44 @@ HTML_PAGE = """<!DOCTYPE html>
   }
   .shortcut:hover { border-color: #4a6cf7; color: #fff; }
 
-  /* 状态 */
+  .cc-panel {
+    background: #1a1d2e;
+    border: 1px solid #2e3250;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+  }
+  .cc-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .cc-item label {
+    font-size: 11px;
+    color: #6b7280;
+  }
+  .cc-item input {
+    width: 110px;
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid #2e3250;
+    background: #0f1117;
+    color: #e0e0e0;
+  }
+  .cc-item.wide input {
+    width: 130px;
+  }
+  .cc-note {
+    font-size: 11px;
+    color: #6b7280;
+    max-width: 360px;
+    line-height: 1.5;
+  }
+
   #status {
     font-size: 13px;
     color: #6b7280;
@@ -166,7 +216,6 @@ HTML_PAGE = """<!DOCTYPE html>
   #status.loading { color: #4a6cf7; }
   #status.error   { color: #ef4444; }
 
-  /* narrative */
   #narrative {
     background: #1a1d2e;
     border: 1px solid #2e3250;
@@ -179,7 +228,6 @@ HTML_PAGE = """<!DOCTYPE html>
     display: none;
   }
 
-  /* 策略表格 */
   .table-wrap {
     overflow-x: auto;
     margin-bottom: 20px;
@@ -209,12 +257,18 @@ HTML_PAGE = """<!DOCTYPE html>
   .score-mid  { color: #fbbf24; }
   .score-low  { color: #f87171; }
   .legs-cell  { font-size: 11px; color: #8892b0; max-width: 300px; line-height: 1.6; }
-  .flag       { display: inline-block; background: #2d1f1f; color: #f87171;
-                font-size: 10px; padding: 1px 6px; border-radius: 4px; margin: 1px; }
+  .flag {
+    display: inline-block;
+    background: #2d1f1f;
+    color: #f87171;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin: 1px;
+  }
   .score-label { font-size: 10px; letter-spacing: 1px; }
   .profit-cond { font-size: 11px; color: #6ee7b7; line-height: 1.5; }
 
-  /* Greeks 小表 */
   .greeks {
     display: inline-flex;
     gap: 10px;
@@ -223,7 +277,6 @@ HTML_PAGE = """<!DOCTYPE html>
   }
   .greeks span { white-space: nowrap; }
 
-  /* intent badge */
   #intent-bar {
     background: #1a1d2e;
     border: 1px solid #2e3250;
@@ -250,7 +303,6 @@ HTML_PAGE = """<!DOCTYPE html>
 <h1>📊 AI Option Advisor</h1>
 
 <div class="input-row">
-  <!-- 多选标的面板 -->
   <div class="underlying-panel">
     <div class="panel-title">
       <span>选择标的</span>
@@ -271,7 +323,6 @@ HTML_PAGE = """<!DOCTYPE html>
     <label><input type="checkbox" value="159922"> 159922 中证500深</label>
   </div>
 
-  <!-- 文字输入区 -->
   <div class="text-area-wrap">
     <textarea id="text" rows="3" placeholder="输入你的市场观点…
 
@@ -284,7 +335,61 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <button id="btn" onclick="runAdvisor()">分析</button>
+  <div class="button-col">
+    <button id="btn" onclick="runAdvisor()">分析</button>
+    <button id="btn-covered" onclick="runCoveredCall()">备兑扫描</button>
+  </div>
+</div>
+
+<div class="cc-panel">
+  <div class="cc-item">
+    <label>持仓手数</label>
+    <input id="cc-hands" type="number" value="2" min="1">
+  </div>
+
+  <div class="cc-item">
+    <label>最短DTE</label>
+    <input id="cc-dte-min" type="number" value="60" min="1">
+  </div>
+
+  <div class="cc-item">
+    <label>最长DTE</label>
+    <input id="cc-dte-max" type="number" value="180" min="1">
+  </div>
+
+  <div class="cc-item">
+    <label>目标Delta</label>
+    <input id="cc-delta-target" type="number" value="0.20" step="0.01" min="0.01" max="0.99">
+  </div>
+
+  <div class="cc-item">
+    <label>Delta容差</label>
+    <input id="cc-delta-tolerance" type="number" value="0.12" step="0.01" min="0.01" max="0.50">
+  </div>
+
+  <div class="cc-item">
+    <label>近期限截止DTE</label>
+    <input id="cc-short-dte-max" type="number" value="120" min="1">
+  </div>
+
+  <div class="cc-item wide">
+    <label>近期限理想上行保护</label>
+    <input id="cc-short-buffer" type="number" value="0.08" step="0.01" min="0" max="1">
+  </div>
+
+  <div class="cc-item wide">
+    <label>远期限理想上行保护</label>
+    <input id="cc-long-buffer" type="number" value="0.10" step="0.01" min="0" max="1">
+  </div>
+
+  <div class="cc-item">
+    <label>Top N</label>
+    <input id="cc-top-n" type="number" value="5" min="1" max="20">
+  </div>
+
+  <div class="cc-note">
+    说明：例如“近期限截止DTE=120，近期限理想上行保护=8%，远期限理想上行保护=10%”，表示 120 天以内按 8%，更长期按 10%。
+  </div>
 </div>
 
 <div class="shortcuts">
@@ -299,13 +404,26 @@ HTML_PAGE = """<!DOCTYPE html>
 <div id="status"></div>
 <div id="intent-bar"></div>
 <div id="narrative"></div>
-<div class="table-wrap"><table id="result-table" style="display:none">
-  <thead><tr>
-    <th>#</th><th>标的</th><th>策略</th><th>评分</th>
-    <th>成本/收入</th><th>Greeks</th><th>IV分位</th><th>腿</th><th>盈利条件</th><th>风险</th>
-  </tr></thead>
-  <tbody id="result-body"></tbody>
-</table></div>
+
+<div class="table-wrap">
+  <table id="result-table" style="display:none">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>标的</th>
+        <th>策略</th>
+        <th>评分</th>
+        <th>成本/收入</th>
+        <th>Greeks</th>
+        <th>IV分位</th>
+        <th>腿</th>
+        <th>盈利条件</th>
+        <th>风险</th>
+      </tr>
+    </thead>
+    <tbody id="result-body"></tbody>
+  </table>
+</div>
 
 <script>
 function setShortcut(text) {
@@ -335,8 +453,14 @@ function clearAll() {
   document.getElementById('chk-ALL').checked = false;
   const others = document.querySelectorAll('.underlying-panel input[type="checkbox"]:not(#chk-ALL)');
   others.forEach(c => { c.checked = false; c.disabled = false; });
-  // 默认保留510300
   document.querySelector('input[value="510300"]').checked = true;
+}
+
+function clearResultArea() {
+  document.getElementById('narrative').style.display = 'none';
+  document.getElementById('result-table').style.display = 'none';
+  document.getElementById('intent-bar').style.display = 'none';
+  document.getElementById('result-body').innerHTML = '';
 }
 
 async function runAdvisor() {
@@ -347,8 +471,6 @@ async function runAdvisor() {
   const isAll = selectedIds.includes('ALL');
   const underlyingId = isAll ? 'ALL' : selectedIds[0];
 
-  // 多选非ALL时，把选中标的注入文字（让LLM感知到标的范围）
-  // 实际走的还是单标的循环，但前端把标的名称拼进text里辅助解析
   let finalText = text;
   if (!isAll && selectedIds.length > 1) {
     const names = selectedIds.join('、');
@@ -365,10 +487,7 @@ async function runAdvisor() {
       ? `分析 ${selectedIds.length} 个标的，预计20-40秒…`
       : '分析中…';
 
-  document.getElementById('narrative').style.display = 'none';
-  document.getElementById('result-table').style.display = 'none';
-  document.getElementById('intent-bar').style.display = 'none';
-  document.getElementById('result-body').innerHTML = '';
+  clearResultArea();
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 200000);
@@ -376,7 +495,6 @@ async function runAdvisor() {
   try {
     const idsToRun = isAll ? ['ALL'] : selectedIds;
 
-    // 并行请求所有标的
     const results = await Promise.all(idsToRun.map(async uid => {
       const resp = await fetch('/advisor/run', {
         method: 'POST',
@@ -402,7 +520,6 @@ async function runAdvisor() {
       }
     }
 
-    // 多标的时按score重新排序取top10
     if (idsToRun.length > 1) {
       allRows.sort((a, b) => b.score - a.score);
       allRows = allRows.slice(0, 10).map((r, i) => ({ ...r, rank: i + 1 }));
@@ -416,6 +533,77 @@ async function runAdvisor() {
     status.textContent = '请求失败：' + e.message;
   } finally {
     clearTimeout(timeoutId);
+    btn.disabled = false;
+  }
+}
+
+async function runCoveredCall() {
+  const selectedIds = getSelectedUnderlyings();
+  const isAll = selectedIds.includes('ALL');
+  const underlyingId = isAll ? '510300' : selectedIds[0];
+
+  const hands = Number(document.getElementById('cc-hands').value || 2);
+  const dteMin = Number(document.getElementById('cc-dte-min').value || 60);
+  const dteMax = Number(document.getElementById('cc-dte-max').value || 180);
+  const deltaTarget = Number(document.getElementById('cc-delta-target').value || 0.20);
+  const deltaTolerance = Number(document.getElementById('cc-delta-tolerance').value || 0.12);
+  const shortDteMax = Number(document.getElementById('cc-short-dte-max').value || 120);
+  const shortBuffer = Number(document.getElementById('cc-short-buffer').value || 0.08);
+  const longBuffer = Number(document.getElementById('cc-long-buffer').value || 0.10);
+  const topN = Number(document.getElementById('cc-top-n').value || 5);
+
+  if (!Number.isFinite(hands) || hands <= 0) {
+    alert("手数输入无效");
+    return;
+  }
+  if (dteMin <= 0 || dteMax < dteMin) {
+    alert("DTE范围输入无效");
+    return;
+  }
+  if (shortDteMax < dteMin) {
+    alert("近期限截止DTE不能小于最短DTE");
+    return;
+  }
+
+  const btn = document.getElementById('btn-covered');
+  const status = document.getElementById('status');
+  btn.disabled = true;
+  status.className = 'loading';
+  status.textContent = '备兑扫描中…';
+
+  clearResultArea();
+
+  try {
+    const resp = await fetch('/advisor/covered-call', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        underlying_id: underlyingId,
+        hands: hands,
+        dte_min: dteMin,
+        dte_max: dteMax,
+        delta_target: deltaTarget,
+        delta_tolerance: deltaTolerance,
+        max_rel_spread: 0.05,
+        fee_per_share: 0.0004,
+        top_n: topN,
+        target_upside_rules: [
+          { dte_max: shortDteMax, target_upside_buffer: shortBuffer },
+          { dte_max: 9999, target_upside_buffer: longBuffer }
+        ]
+      })
+    });
+
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const payload = await resp.json();
+    renderCoveredCallResult(payload.data);
+
+    status.className = '';
+    status.textContent = '';
+  } catch (e) {
+    status.className = 'error';
+    status.textContent = '请求失败：' + e.message;
+  } finally {
     btn.disabled = false;
   }
 }
@@ -480,7 +668,74 @@ function renderResult(data) {
       <td>${r.cost}</td>
       <td>${greeks}</td>
       <td><span class="iv-label">${r.iv_label}(${ivPctNum})</span></td>
-      <td class="legs-cell">${(r.legs||'').replace(/ \/ /g,'<br>')}</td>
+      <td class="legs-cell">${(r.legs||'').replace(/ \\/ /g,'<br>')}</td>
+      <td>${profit}</td>
+      <td>${flags}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('result-table').style.display = 'table';
+}
+
+function renderCoveredCallResult(data) {
+  const intentBar = document.getElementById('intent-bar');
+  intentBar.style.display = 'flex';
+
+  const rulesText = (data.params.target_upside_rules || [])
+    .map(r => `DTE≤${r.dte_max}: ${(r.target_upside_buffer * 100).toFixed(1)}%`)
+    .join(' / ');
+
+  intentBar.innerHTML = `
+    <span>备兑扫描：</span>
+    <span class="badge">标的: ${data.underlying_id}</span>
+    <span class="badge">手数: ${data.hands}</span>
+    <span class="badge">份额: ${data.total_shares}</span>
+    <span class="badge">DTE: ${data.params.dte_min}-${data.params.dte_max}</span>
+    <span class="badge">目标Delta: ${data.params.delta_target}</span>
+    <span class="badge">理想上行保护: ${rulesText || '未设置'}</span>
+  `;
+
+  const narrativeEl = document.getElementById('narrative');
+  narrativeEl.style.display = 'block';
+  narrativeEl.textContent =
+    `备兑扫描结果：${data.underlying_id}，持仓 ${data.hands} 手（${data.total_shares} 份），按评分展示前 ${data.params.top_n} 个候选 short call。`;
+
+  const rows = data.items || [];
+  const tbody = document.getElementById('result-body');
+
+  tbody.innerHTML = rows.map((r, i) => {
+    const scoreClass = r.score >= 1.0 ? 'score-high'
+                     : r.score >= 0.75 ? 'score-mid'
+                     : 'score-low';
+
+    const greeks = `<div class="greeks">
+      <span>Δ=${r.delta}</span>
+      <span>IV=${r.iv}</span>
+      <span>DTE=${r.dte}</span>
+    </div>`;
+
+    const cost = `预计收入 ${r.estimated_total_income_mid}`;
+    const legs = `卖CALL K=${r.strike}<br>到期=${r.expiry_date}<br>bid=${r.bid} ask=${r.ask} mid=${r.mid}<br>建议挂单=${r.limit_price}`;
+    const profit = `<span class="profit-cond">
+      年化=${(r.ann_yield * 100).toFixed(1)}%<br>
+      上行缓冲=${r.upside_buffer !== null ? (r.upside_buffer * 100).toFixed(1) + '%' : '—'}<br>
+      该DTE目标保护=${r.target_upside_buffer !== null && r.target_upside_buffer !== undefined ? (r.target_upside_buffer * 100).toFixed(1) + '%' : '—'}<br>
+      保护评分=${r.buffer_score}
+    </span>`;
+    const flags = `
+      <span class="flag">spread=${(r.rel_spread * 100).toFixed(1)}%</span>
+      <span class="flag">收入(挂单)=${r.estimated_total_income_limit}</span>
+    `;
+
+    return `<tr class="${i===0?'rank-1':''}">
+      <td>${i + 1}</td>
+      <td>${r.underlying_id}</td>
+      <td><b>covered_call</b></td>
+      <td class="${scoreClass}">${r.score}</td>
+      <td>${cost}</td>
+      <td>${greeks}</td>
+      <td>—</td>
+      <td class="legs-cell">${legs}</td>
       <td>${profit}</td>
       <td>${flags}</td>
     </tr>`;

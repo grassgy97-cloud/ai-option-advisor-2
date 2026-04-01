@@ -1,52 +1,34 @@
 from __future__ import annotations
 
 import json
-import time
+import requests
 
-from app.core.db import engine
-from app.strategy.advisor_service_v2 import run_advisor
+BASE_URL = "http://127.0.0.1:8010"
 
 
 def main():
-    cases = [
-        {
-            "text": "我对510300轻微看空，认购偏贵，想做有限风险的多腿策略，期限一个月左右",
-            "underlying_id": "510300",
-        },
-        {
-            "text": "我对510300轻微看空，认购偏贵，想做有限风险的多腿策略，期限一个月左右",
-            "underlying_id": "ALL",
-        },
-    ]
+    payload = {
+        "underlying_id": "510300",
+        "hands": 2,
+        "dte_min": 60,
+        "dte_max": 180,
+        "delta_target": 0.20,
+        "delta_tolerance": 0.12,
+        "max_rel_spread": 0.05,
+        "fee_per_share": 0.0004,
+        "top_n": 5,
+        "target_upside_rules": [
+            {"dte_max": 120, "target_upside_buffer": 0.08},
+            {"dte_max": 9999, "target_upside_buffer": 0.10}
+        ]
+    }
 
-    for i, case in enumerate(cases, 1):
-        print("\n" + "=" * 80)
-        print(f"[case {i}] underlying_id={case['underlying_id']}")
-        print(f"[case {i}] text={case['text']}")
+    resp = requests.post(f"{BASE_URL}/advisor/covered-call", json=payload, timeout=120)
+    print("status_code =", resp.status_code)
+    resp.raise_for_status()
 
-        t0 = time.perf_counter()
-        resp = run_advisor(
-            engine=engine,
-            text=case["text"],
-            underlying_id=case["underlying_id"],
-        )
-        elapsed = time.perf_counter() - t0
-
-        print(f"[case {i}] total elapsed = {elapsed:.3f}s")
-        print(f"[case {i}] resolved_candidates = {len(resp.resolved_candidates)}")
-
-        top = []
-        for s in resp.resolved_candidates[:5]:
-            top.append({
-                "strategy_type": s.strategy_type,
-                "underlying_id": s.underlying_id,
-                "score": s.score,
-                "net_credit": s.net_credit,
-                "net_debit": s.net_debit,
-            })
-
-        print("[case top5]")
-        print(json.dumps(top, ensure_ascii=False, indent=2))
+    data = resp.json()
+    print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

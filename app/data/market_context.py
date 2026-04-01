@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
-
+import time
 
 def _fetch_kline(engine: Engine, underlying_id: str, n: int = 65) -> List[Dict[str, Any]]:
     """取最近n条日K，按日期升序。"""
