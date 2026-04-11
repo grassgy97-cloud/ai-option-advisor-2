@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from typing import List, Optional
+import math
+from typing import Any, Dict, List, Optional
 
 from app.models.schemas import (
+    FamilyCandidate,
+    FamilyConstraintBundle,
     IntentSpec,
+    OpportunityCandidate,
+    OpportunityType,
+    StrategyFamily,
     StrategySpec,
     StrategyLegSpec,
     StrategyConstraint,
@@ -26,6 +32,507 @@ def _get_resistance(intent: IntentSpec) -> Optional[float]:
 def _get_target(intent: IntentSpec) -> Optional[float]:
     """目标价位，正负均可"""
     return intent.price_levels.get("target")
+
+
+_STRATEGY_FAMILY_MAP: Dict[str, StrategyFamily] = {
+    "bear_call_spread": "vertical",
+    "bull_put_spread": "vertical",
+    "bull_call_spread": "vertical",
+    "bear_put_spread": "vertical",
+    "call_calendar": "calendar",
+    "put_calendar": "calendar",
+    "diagonal_call": "diagonal",
+    "diagonal_put": "diagonal",
+    "iron_condor": "iron",
+    "iron_fly": "iron",
+    "long_call": "long_single",
+    "long_put": "long_single",
+    "naked_call": "naked_short",
+    "naked_put": "naked_short",
+    "covered_call": "covered_call",
+}
+
+_FAMILY_STRATEGY_TYPES: Dict[StrategyFamily, set[str]] = {
+    "vertical": {"bear_call_spread", "bull_put_spread", "bull_call_spread", "bear_put_spread"},
+    "calendar": {"call_calendar", "put_calendar"},
+    "diagonal": {"diagonal_call", "diagonal_put"},
+    "iron": {"iron_condor", "iron_fly"},
+    "naked_short": {"naked_call", "naked_put"},
+    "long_single": {"long_call", "long_put"},
+    "covered_call": {"covered_call"},
+}
+
+_OPPORTUNITY_FAMILY_WEIGHTS: Dict[OpportunityType, Dict[StrategyFamily, float]] = {
+    "directional_defined_risk": {"vertical": 1.0},
+    "directional_convexity": {"long_single": 1.0, "diagonal": 0.75},
+    "range_income": {"iron": 1.0, "naked_short": 0.8},
+    "vol_rich_carry": {"iron": 0.85, "vertical": 0.7, "naked_short": 0.8},
+    "term_structure_carry": {"calendar": 1.0, "diagonal": 0.9},
+    "covered_income": {"covered_call": 1.0},
+}
+
+_CALENDAR_TERM_THRESHOLD = 0.45
+_CALENDAR_SURFACE_THRESHOLD = 0.60
+_DIAGONAL_DIRECTION_THRESHOLD = 0.40
+
+
+def _clip01(v: float) -> float:
+    return max(0.0, min(1.0, v))
+
+
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_value(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe_value(v) for v in value]
+    return value
+
+
+def _get_uid_ctx(intent: IntentSpec) -> Dict[str, Any]:
+    ctx_data = getattr(intent, "market_context_data", {}) or {}
+    return ctx_data.get(intent.underlying_id) or (next(iter(ctx_data.values())) if ctx_data else {})
+
+
+def _strategy_family_for_type(strategy_type: str) -> StrategyFamily:
+    return _STRATEGY_FAMILY_MAP.get(strategy_type, "vertical")
+
+
+def _default_opportunity_for_family(family: StrategyFamily) -> OpportunityType:
+    mapping: Dict[StrategyFamily, OpportunityType] = {
+        "vertical": "directional_defined_risk",
+        "calendar": "term_structure_carry",
+        "diagonal": "term_structure_carry",
+        "iron": "range_income",
+        "naked_short": "vol_rich_carry",
+        "long_single": "directional_convexity",
+        "covered_call": "covered_income",
+    }
+    return mapping[family]
+
+
+def _build_opportunity_evidence_summary(
+    intent: IntentSpec,
+    iv_pct: Optional[float] = None,
+) -> Dict[str, Any]:
+    uid_ctx = _get_uid_ctx(intent)
+    term_slope_call = float(uid_ctx.get("term_slope_call") or 0.0)
+    term_slope_put = float(uid_ctx.get("term_slope_put") or 0.0)
+    skew = float(uid_ctx.get("put_call_skew") or 0.0)
+    trend = uid_ctx.get("trend")
+
+    direction_strength = 0.0
+    if intent.market_view in ("bullish", "bearish"):
+        direction_strength = max(direction_strength, 0.55)
+    if intent.asymmetry in ("upside", "downside"):
+        direction_strength = max(direction_strength, 0.65)
+    delta_pref = intent.greeks_preference.get("delta", {})
+    if isinstance(delta_pref, dict) and delta_pref.get("sign") in ("positive", "negative"):
+        direction_strength = max(direction_strength, 0.25 + 0.5 * float(delta_pref.get("strength", 0.0) or 0.0))
+    if trend in ("uptrend", "downtrend"):
+        direction_strength = max(direction_strength, 0.45)
+
+    term_carry_strength = max(
+        _clip01(max(term_slope_call, 0.0) / 0.05),
+        _clip01(max(term_slope_put, 0.0) / 0.05),
+    )
+
+    surface_rv_strength = _clip01(abs(skew) / 0.05)
+    if intent.vol_view in ("call_iv_rich", "put_iv_rich"):
+        surface_rv_strength = max(surface_rv_strength, 0.65)
+
+    iv_rich_strength = 0.0
+    if intent.vol_view == "iv_high":
+        iv_rich_strength = max(iv_rich_strength, 0.70)
+    if iv_pct is not None and iv_pct >= 0.70:
+        iv_rich_strength = max(iv_rich_strength, _clip01((iv_pct - 0.55) / 0.30))
+
+    low_iv_convexity_strength = 0.0
+    if intent.vol_view == "iv_low":
+        low_iv_convexity_strength = max(low_iv_convexity_strength, 0.70)
+    if iv_pct is not None and iv_pct <= 0.30:
+        low_iv_convexity_strength = max(low_iv_convexity_strength, _clip01((0.45 - iv_pct) / 0.30))
+
+    covered_income_signal = 1.0 if intent.allowed_strategies == ["covered_call"] else 0.0
+
+    return {
+        "market_view": intent.market_view,
+        "vol_view": intent.vol_view,
+        "asymmetry": intent.asymmetry,
+        "iv_percentile": iv_pct,
+        "trend": trend,
+        "term_slope_call": term_slope_call,
+        "term_slope_put": term_slope_put,
+        "put_call_skew": skew,
+        "direction_strength": round(direction_strength, 4),
+        "term_carry_strength": round(term_carry_strength, 4),
+        "surface_rv_strength": round(surface_rv_strength, 4),
+        "iv_rich_strength": round(iv_rich_strength, 4),
+        "low_iv_convexity_strength": round(low_iv_convexity_strength, 4),
+        "covered_income_signal": round(covered_income_signal, 4),
+        "explicit_term_signal": intent.vol_view in ("term_front_high", "term_back_high"),
+    }
+
+
+def derive_opportunity_candidates(
+    intent: IntentSpec,
+    iv_pct: Optional[float] = None,
+) -> List[OpportunityCandidate]:
+    evidence = _build_opportunity_evidence_summary(intent, iv_pct=iv_pct)
+    candidates: List[OpportunityCandidate] = []
+
+    direction_strength = float(evidence["direction_strength"])
+    term_carry_strength = float(evidence["term_carry_strength"])
+    surface_rv_strength = float(evidence["surface_rv_strength"])
+    iv_rich_strength = float(evidence["iv_rich_strength"])
+    low_iv_convexity_strength = float(evidence["low_iv_convexity_strength"])
+    covered_income_signal = float(evidence["covered_income_signal"])
+
+    if intent.market_view in ("bullish", "bearish") or intent.asymmetry in ("upside", "downside"):
+        score = max(0.55, 0.55 + 0.25 * direction_strength)
+        candidates.append(OpportunityCandidate(
+            opportunity_type="directional_defined_risk",
+            underlying_id=intent.underlying_id,
+            score=round(score, 4),
+            confidence=round(direction_strength, 4),
+            evidence=evidence,
+            rationale="directional view with controlled-risk structure preference",
+            source_flags={
+                "explicit_user_signal": intent.market_view in ("bullish", "bearish"),
+                "inferred_signal": intent.asymmetry in ("upside", "downside"),
+                "machine_signal": bool(evidence.get("trend")),
+            },
+        ))
+
+    if direction_strength > 0 or low_iv_convexity_strength > 0:
+        score = max(direction_strength, low_iv_convexity_strength, 0.45)
+        candidates.append(OpportunityCandidate(
+            opportunity_type="directional_convexity",
+            underlying_id=intent.underlying_id,
+            score=round(score, 4),
+            confidence=round(max(direction_strength, low_iv_convexity_strength), 4),
+            evidence=evidence,
+            rationale="directional or asymmetric move with convexity demand",
+            source_flags={
+                "explicit_user_signal": intent.asymmetry in ("upside", "downside"),
+                "inferred_signal": intent.market_view in ("bullish", "bearish"),
+                "machine_signal": low_iv_convexity_strength > 0,
+            },
+        ))
+
+    if intent.market_view == "neutral" or iv_rich_strength > 0.50:
+        base = 0.50 if intent.market_view == "neutral" else 0.35
+        score = max(base, 0.45 + 0.25 * iv_rich_strength)
+        candidates.append(OpportunityCandidate(
+            opportunity_type="range_income",
+            underlying_id=intent.underlying_id,
+            score=round(score, 4),
+            confidence=round(max(iv_rich_strength, 0.5 if intent.market_view == "neutral" else 0.0), 4),
+            evidence=evidence,
+            rationale="range-bound or income-oriented setup",
+            source_flags={
+                "explicit_user_signal": False,
+                "inferred_signal": intent.market_view == "neutral",
+                "machine_signal": iv_rich_strength > 0.50,
+            },
+        ))
+
+    if intent.vol_view in ("iv_high", "call_iv_rich", "put_iv_rich") or iv_rich_strength > 0:
+        score = max(iv_rich_strength, surface_rv_strength, 0.50)
+        candidates.append(OpportunityCandidate(
+            opportunity_type="vol_rich_carry",
+            underlying_id=intent.underlying_id,
+            score=round(score, 4),
+            confidence=round(max(iv_rich_strength, surface_rv_strength), 4),
+            evidence=evidence,
+            rationale="sell-vol or carry opportunity from rich surface conditions",
+            source_flags={
+                "explicit_user_signal": intent.vol_view in ("iv_high", "call_iv_rich", "put_iv_rich"),
+                "inferred_signal": False,
+                "machine_signal": iv_rich_strength > 0 or surface_rv_strength > 0,
+            },
+        ))
+
+    if term_carry_strength > 0 or surface_rv_strength > 0 or evidence["explicit_term_signal"]:
+        score = max(term_carry_strength, min(0.85, surface_rv_strength * 0.9), 0.45 if evidence["explicit_term_signal"] else 0.0)
+        candidates.append(OpportunityCandidate(
+            opportunity_type="term_structure_carry",
+            underlying_id=intent.underlying_id,
+            score=round(score, 4),
+            confidence=round(max(term_carry_strength, surface_rv_strength), 4),
+            evidence=evidence,
+            rationale="surface carry or relative-value signal between maturities",
+            source_flags={
+                "explicit_user_signal": bool(evidence["explicit_term_signal"]),
+                "inferred_signal": intent.vol_view in ("call_iv_rich", "put_iv_rich"),
+                "machine_signal": term_carry_strength > 0 or surface_rv_strength > 0,
+            },
+        ))
+
+    if covered_income_signal > 0:
+        candidates.append(OpportunityCandidate(
+            opportunity_type="covered_income",
+            underlying_id=intent.underlying_id,
+            score=1.0,
+            confidence=1.0,
+            evidence=evidence,
+            rationale="explicit covered-call income use case",
+            source_flags={
+                "explicit_user_signal": True,
+                "inferred_signal": False,
+                "machine_signal": False,
+            },
+        ))
+
+    return candidates
+
+
+def build_family_constraints(
+    intent: IntentSpec,
+    iv_pct: Optional[float] = None,
+) -> FamilyConstraintBundle:
+    uid_ctx = _get_uid_ctx(intent)
+    bundle = FamilyConstraintBundle()
+
+    if intent.allowed_strategies:
+        bundle.user_hard.allowed_families = sorted({
+            _strategy_family_for_type(s) for s in intent.allowed_strategies
+        })
+        bundle.user_hard.notes.append("derived from allowed_strategies")
+
+    banned_types = set(intent.banned_strategies or [])
+    for family, members in _FAMILY_STRATEGY_TYPES.items():
+        if members and members.issubset(banned_types):
+            bundle.user_hard.banned_families.append(family)
+    if bundle.user_hard.banned_families:
+        bundle.user_hard.notes.append("derived from full-family banned_strategies")
+
+    if intent.defined_risk_only:
+        bundle.user_hard.require_defined_risk = True
+        if "naked_short" not in bundle.user_hard.banned_families:
+            bundle.user_hard.banned_families.append("naked_short")
+        bundle.user_hard.notes.append("defined_risk_only")
+
+    if intent.prefer_multi_leg:
+        bundle.user_soft.prefer_multi_leg = True
+        bundle.user_soft.weights.update({
+            "vertical": 0.12,
+            "calendar": 0.08,
+            "diagonal": 0.08,
+            "iron": 0.10,
+        })
+        bundle.user_soft.notes.append("prefer_multi_leg")
+
+    if intent.market_view in ("bullish", "bearish"):
+        bundle.inferred_soft.weights["vertical"] = 0.10
+        bundle.inferred_soft.weights["long_single"] = 0.08
+        bundle.inferred_soft.notes.append("directional market_view")
+    elif intent.market_view == "neutral":
+        bundle.inferred_soft.weights["iron"] = 0.10
+        bundle.inferred_soft.weights["naked_short"] = 0.05
+        bundle.inferred_soft.notes.append("neutral market_view")
+
+    if intent.asymmetry in ("upside", "downside"):
+        bundle.inferred_soft.weights["long_single"] = bundle.inferred_soft.weights.get("long_single", 0.0) + 0.06
+        bundle.inferred_soft.weights["diagonal"] = bundle.inferred_soft.weights.get("diagonal", 0.0) + 0.04
+        bundle.inferred_soft.notes.append("asymmetry preference")
+
+    if intent.risk_preference == "low":
+        bundle.inferred_soft.weights["vertical"] = bundle.inferred_soft.weights.get("vertical", 0.0) + 0.06
+        bundle.inferred_soft.weights["iron"] = bundle.inferred_soft.weights.get("iron", 0.0) + 0.04
+        bundle.inferred_soft.notes.append("low risk preference")
+    elif intent.risk_preference == "high":
+        bundle.inferred_soft.weights["long_single"] = bundle.inferred_soft.weights.get("long_single", 0.0) + 0.05
+        bundle.inferred_soft.weights["naked_short"] = bundle.inferred_soft.weights.get("naked_short", 0.0) + 0.05
+        bundle.inferred_soft.notes.append("high risk preference")
+
+    term_strength = max(
+        _clip01(max(float(uid_ctx.get("term_slope_call") or 0.0), 0.0) / 0.05),
+        _clip01(max(float(uid_ctx.get("term_slope_put") or 0.0), 0.0) / 0.05),
+    )
+    if term_strength > 0:
+        bundle.machine_soft.weights["calendar"] = max(bundle.machine_soft.weights.get("calendar", 0.0), round(0.15 * term_strength, 4))
+        bundle.machine_soft.weights["diagonal"] = max(bundle.machine_soft.weights.get("diagonal", 0.0), round(0.10 * term_strength, 4))
+        bundle.machine_soft.notes.append("term structure support")
+
+    skew = abs(float(uid_ctx.get("put_call_skew") or 0.0))
+    if skew > 0:
+        bundle.machine_soft.weights["calendar"] = max(bundle.machine_soft.weights.get("calendar", 0.0), round(0.08 * _clip01(skew / 0.05), 4))
+        bundle.machine_soft.weights["diagonal"] = max(bundle.machine_soft.weights.get("diagonal", 0.0), round(0.06 * _clip01(skew / 0.05), 4))
+        bundle.machine_soft.notes.append("surface relative-value support")
+
+    if iv_pct is not None and iv_pct >= 0.70:
+        bundle.machine_soft.weights["iron"] = max(bundle.machine_soft.weights.get("iron", 0.0), round(0.12 * _clip01((iv_pct - 0.55) / 0.30), 4))
+        bundle.machine_soft.weights["naked_short"] = max(bundle.machine_soft.weights.get("naked_short", 0.0), round(0.10 * _clip01((iv_pct - 0.55) / 0.30), 4))
+        bundle.machine_soft.weights["vertical"] = max(bundle.machine_soft.weights.get("vertical", 0.0), 0.04)
+        bundle.machine_soft.notes.append("high IV percentile")
+    elif iv_pct is not None and iv_pct <= 0.30:
+        bundle.machine_soft.weights["long_single"] = max(bundle.machine_soft.weights.get("long_single", 0.0), round(0.12 * _clip01((0.45 - iv_pct) / 0.30), 4))
+        bundle.machine_soft.notes.append("low IV percentile")
+
+    return bundle
+
+
+def _build_calendar_diagonal_gate_results(
+    intent: IntentSpec,
+    iv_pct: Optional[float] = None,
+) -> Dict[str, Dict[str, Any]]:
+    evidence = _build_opportunity_evidence_summary(intent, iv_pct=iv_pct)
+    term_strength = float(evidence["term_carry_strength"])
+    surface_strength = float(evidence["surface_rv_strength"])
+    direction_strength = float(evidence["direction_strength"])
+    explicit_term_signal = bool(evidence["explicit_term_signal"])
+
+    calendar_reasons: List[str] = []
+    if term_strength >= _CALENDAR_TERM_THRESHOLD:
+        calendar_reasons.append("term_carry_strength above threshold")
+    if surface_strength >= _CALENDAR_SURFACE_THRESHOLD:
+        calendar_reasons.append("surface_rv_strength above threshold")
+    if explicit_term_signal:
+        calendar_reasons.append("explicit term-structure signal")
+
+    calendar_passed = bool(calendar_reasons)
+    if not calendar_reasons:
+        calendar_reasons.append("no strong term/carry evidence yet")
+
+    diagonal_reasons = [r for r in calendar_reasons if r != "no strong term/carry evidence yet"]
+    if direction_strength >= _DIAGONAL_DIRECTION_THRESHOLD:
+        diagonal_reasons.append("direction_strength above threshold")
+
+    diagonal_passed = calendar_passed and direction_strength >= _DIAGONAL_DIRECTION_THRESHOLD
+    if not diagonal_reasons:
+        diagonal_reasons.append("no combined carry plus directional evidence yet")
+
+    gate_inputs = {
+        "term_carry_strength": round(term_strength, 4),
+        "surface_rv_strength": round(surface_strength, 4),
+        "direction_strength": round(direction_strength, 4),
+        "explicit_term_signal": explicit_term_signal,
+        "calendar_term_threshold": _CALENDAR_TERM_THRESHOLD,
+        "calendar_surface_threshold": _CALENDAR_SURFACE_THRESHOLD,
+        "diagonal_direction_threshold": _DIAGONAL_DIRECTION_THRESHOLD,
+    }
+
+    return {
+        "calendar": {
+            "family": "calendar",
+            "passed": calendar_passed,
+            "reasons": calendar_reasons,
+            "inputs": gate_inputs,
+            "mode": "metadata_only",
+        },
+        "diagonal": {
+            "family": "diagonal",
+            "passed": diagonal_passed,
+            "reasons": diagonal_reasons,
+            "inputs": gate_inputs,
+            "mode": "metadata_only",
+        },
+    }
+
+
+def _family_soft_signal_summary(
+    bundle: FamilyConstraintBundle,
+    family: StrategyFamily,
+) -> Dict[str, float]:
+    return {
+        "user_soft": round(float(bundle.user_soft.weights.get(family, 0.0)), 4),
+        "inferred_soft": round(float(bundle.inferred_soft.weights.get(family, 0.0)), 4),
+        "machine_soft": round(float(bundle.machine_soft.weights.get(family, 0.0)), 4),
+    }
+
+
+def derive_family_candidates(
+    opportunities: List[OpportunityCandidate],
+    constraints: FamilyConstraintBundle,
+    intent: IntentSpec,
+    iv_pct: Optional[float] = None,
+) -> List[FamilyCandidate]:
+    gate_results = _build_calendar_diagonal_gate_results(intent, iv_pct=iv_pct)
+    candidates_by_family: Dict[StrategyFamily, FamilyCandidate] = {}
+
+    for opp in opportunities:
+        family_weights = _OPPORTUNITY_FAMILY_WEIGHTS.get(opp.opportunity_type, {})
+        for family, multiplier in family_weights.items():
+            soft_signals = _family_soft_signal_summary(constraints, family)
+            soft_total = sum(soft_signals.values())
+            base_score = opp.score * multiplier
+            score = round(base_score + soft_total, 4)
+
+            gating_passed = True
+            gating_reasons: List[str] = []
+            gate_metadata: Dict[str, Any] = {}
+            if family in ("calendar", "diagonal"):
+                gate = gate_results[family]
+                gating_passed = bool(gate["passed"])
+                gating_reasons = list(gate["reasons"])
+                gate_metadata = dict(gate)
+
+            hard_constraints_applied: List[str] = []
+            if constraints.user_hard.allowed_families and family not in constraints.user_hard.allowed_families:
+                hard_constraints_applied.append("outside explicit allowed_families")
+            if family in constraints.user_hard.banned_families:
+                hard_constraints_applied.append("explicitly banned family")
+            if constraints.user_hard.require_defined_risk and family == "naked_short":
+                hard_constraints_applied.append("require_defined_risk removes naked_short")
+
+            candidate = FamilyCandidate(
+                family=family,
+                underlying_id=opp.underlying_id,
+                opportunity_type=opp.opportunity_type,
+                score=score,
+                confidence=round(max(opp.confidence, min(1.0, base_score)), 4),
+                gating_passed=gating_passed,
+                gating_reasons=gating_reasons,
+                hard_constraints_applied=hard_constraints_applied,
+                soft_signals=soft_signals,
+                rationale=opp.rationale,
+                metadata={
+                    "gate": gate_metadata,
+                    "opportunity_evidence": opp.evidence,
+                    "source_flags": opp.source_flags,
+                    "metadata_mode": "planning_only",
+                },
+            )
+
+            existing = candidates_by_family.get(family)
+            if existing is None or candidate.score > existing.score:
+                candidates_by_family[family] = candidate
+
+    return list(candidates_by_family.values())
+
+
+def _select_opportunity_for_family(
+    opportunities: List[OpportunityCandidate],
+    family: StrategyFamily,
+) -> Optional[OpportunityCandidate]:
+    mapped = [
+        opp for opp in opportunities
+        if family in _OPPORTUNITY_FAMILY_WEIGHTS.get(opp.opportunity_type, {})
+    ]
+    if not mapped:
+        return None
+    return max(mapped, key=lambda x: x.score)
+
+
+def _serialize_family_gate_results(family_candidates: List[FamilyCandidate]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for candidate in family_candidates:
+        if candidate.family not in ("calendar", "diagonal"):
+            continue
+        gate = candidate.metadata.get("gate") or {}
+        out[candidate.family] = {
+            "passed": candidate.gating_passed,
+            "reasons": candidate.gating_reasons,
+            "inputs": gate.get("inputs", {}),
+            "mode": gate.get("mode", "metadata_only"),
+        }
+    return out
 
 
 # ==============================
@@ -475,12 +982,25 @@ def compile_intent_to_strategies(
     iv_pct: Optional[float] = None,
 ) -> List[StrategySpec]:
     candidates: List[tuple[str, float]] = []
+    opportunity_candidates = derive_opportunity_candidates(intent, iv_pct=iv_pct)
+    family_constraints = build_family_constraints(intent, iv_pct=iv_pct)
+    family_candidates = derive_family_candidates(
+        opportunity_candidates,
+        family_constraints,
+        intent,
+        iv_pct=iv_pct,
+    )
+    family_candidate_map: Dict[StrategyFamily, FamilyCandidate] = {c.family: c for c in family_candidates}
+    family_gate_results: Dict[str, Dict[str, Any]] = _json_safe_value(
+        _build_calendar_diagonal_gate_results(intent, iv_pct=iv_pct)
+    )
+    family_constraints_meta: Dict[str, Any] = _json_safe_value(family_constraints.model_dump())
+    fallback_evidence: Dict[str, Any] = _json_safe_value(
+        _build_opportunity_evidence_summary(intent, iv_pct=iv_pct)
+    )
 
     # ===== 取market_context里的term_slope，计算calendar动态prior =====
-    ctx_data = getattr(intent, "market_context_data", {}) or {}
-    uid_ctx = ctx_data.get(intent.underlying_id) or (
-        next(iter(ctx_data.values())) if ctx_data else {}
-    )
+    uid_ctx = _get_uid_ctx(intent)
     term_slope_call = uid_ctx.get("term_slope_call")
     term_slope_put  = uid_ctx.get("term_slope_put")
 
@@ -703,8 +1223,48 @@ def compile_intent_to_strategies(
         spec = build_strategy_spec(strategy_type, intent)
         if spec is None:
             continue
+
         spec.metadata = spec.metadata or {}
         spec.metadata["prior_weight"] = weight
+        family = _strategy_family_for_type(strategy_type)
+        family_candidate = family_candidate_map.get(family)
+        opportunity_candidate = _select_opportunity_for_family(opportunity_candidates, family)
+        opportunity_type = (
+            family_candidate.opportunity_type
+            if family_candidate is not None
+            else _default_opportunity_for_family(family)
+        )
+
+        spec.metadata["opportunity_type"] = opportunity_type
+        spec.metadata["strategy_family"] = family
+        spec.metadata["opportunity_score"] = _json_safe_value(round(
+            opportunity_candidate.score if opportunity_candidate is not None else weight,
+            4,
+        ))
+        spec.metadata["opportunity_confidence"] = _json_safe_value(round(
+            opportunity_candidate.confidence if opportunity_candidate is not None else weight,
+            4,
+        ))
+        spec.metadata["opportunity_evidence_summary"] = _json_safe_value(
+            dict(opportunity_candidate.evidence)
+            if opportunity_candidate is not None
+            else dict(fallback_evidence)
+        )
+        spec.metadata["family_score"] = _json_safe_value(round(
+            family_candidate.score if family_candidate is not None else weight,
+            4,
+        ))
+        spec.metadata["family_confidence"] = _json_safe_value(round(
+            family_candidate.confidence if family_candidate is not None else weight,
+            4,
+        ))
+        spec.metadata["family_constraints"] = family_constraints_meta
+        spec.metadata["family_gate_results"] = family_gate_results
+        if family_candidate is not None:
+            spec.metadata["family_soft_signals"] = _json_safe_value(dict(family_candidate.soft_signals))
+            spec.metadata["family_hard_constraints_applied"] = _json_safe_value(list(family_candidate.hard_constraints_applied))
+            spec.metadata["family_gate_passed"] = family_candidate.gating_passed
+            spec.metadata["family_gate_reasons"] = _json_safe_value(list(family_candidate.gating_reasons))
         specs.append(spec)
 
     return specs

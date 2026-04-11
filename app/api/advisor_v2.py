@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import traceback
+
 from fastapi import APIRouter, HTTPException
 
 from app.core.db import engine
@@ -22,4 +24,5 @@ def advisor_run(req: AdvisorRunRequest):
     except HTTPException:
         raise
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"/advisor/run failed: {e}")

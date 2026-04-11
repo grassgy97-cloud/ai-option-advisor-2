@@ -38,6 +38,82 @@ ALL_UNDERLYING_IDS = [
     "159915", "159901", "159919", "159922",
 ]
 
+_VALID_STRATEGY_NAMES = {
+    "bear_call_spread",
+    "bull_put_spread",
+    "call_calendar",
+    "put_calendar",
+    "diagonal_call",
+    "diagonal_put",
+    "bull_call_spread",
+    "bear_put_spread",
+    "iron_condor",
+    "iron_fly",
+    "long_call",
+    "long_put",
+    "naked_call",
+    "naked_put",
+    "covered_call",
+}
+
+_STRATEGY_ALIASES = {
+    "call_diagonal": "diagonal_call",
+    "put_diagonal": "diagonal_put",
+    "calendar_call": "call_calendar",
+    "calendar_put": "put_calendar",
+    "callcalendar": "call_calendar",
+    "putcalendar": "put_calendar",
+    "diagonalcall": "diagonal_call",
+    "diagonalput": "diagonal_put",
+    "bull_call": "bull_call_spread",
+    "bull_put": "bull_put_spread",
+    "bear_call": "bear_call_spread",
+    "bear_put": "bear_put_spread",
+    "longcall": "long_call",
+    "longput": "long_put",
+    "nakedcall": "naked_call",
+    "nakedput": "naked_put",
+    "coveredcall": "covered_call",
+    "ironcondor": "iron_condor",
+    "ironfly": "iron_fly",
+}
+
+
+def _canonicalize_strategy_name(name: Any) -> Optional[str]:
+    if not isinstance(name, str):
+        return None
+
+    key = name.strip().lower()
+    if not key:
+        return None
+
+    key = key.replace("-", "_").replace(" ", "_")
+    key = _STRATEGY_ALIASES.get(key, key)
+
+    if key in _VALID_STRATEGY_NAMES:
+        return key
+    return None
+
+
+def _normalize_strategy_names(raw_names: Any, field_name: str) -> List[str]:
+    if not isinstance(raw_names, list):
+        return []
+
+    normalized: List[str] = []
+    seen = set()
+
+    for raw_name in raw_names:
+        canonical = _canonicalize_strategy_name(raw_name)
+        if canonical is None:
+            if isinstance(raw_name, str) and raw_name.strip():
+                print(f"[parse_text_to_intent] ignore invalid {field_name}: {raw_name}")
+            continue
+        if canonical not in seen:
+            normalized.append(canonical)
+            seen.add(canonical)
+
+    return normalized
+
 
 def _merge_greeks_with_context(
     greeks_preference: dict,
@@ -120,8 +196,16 @@ def parse_text_to_intent(
     if not underlying_ids:
         underlying_ids = [underlying_id]
 
-    preferred = result.get("preferred_strategies", [])
+    preferred = _normalize_strategy_names(
+        result.get("preferred_strategies", []),
+        field_name="preferred_strategies",
+    )
     allowed_strategies = preferred if preferred else None
+
+    banned_strategies = _normalize_strategy_names(
+        result.get("banned_strategies", []),
+        field_name="banned_strategies",
+    )
 
     raw_greeks = result.get("greeks_preference", {})
     greeks_preference = {}
@@ -175,7 +259,7 @@ def parse_text_to_intent(
         max_rel_spread=0.03,
         min_quote_size=1,
         allowed_strategies=allowed_strategies,
-        banned_strategies=result.get("banned_strategies", []),
+        banned_strategies=banned_strategies,
         raw_text=text,
         greeks_preference=greeks_preference,
         price_levels=price_levels,
