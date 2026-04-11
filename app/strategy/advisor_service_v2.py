@@ -358,10 +358,14 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
     # 单标的请求强制只跑传入 uid；
     # ALL 模式仍由 intent.effective_underlying_ids 决定。
     # （如果你后面要改成“ALL 强制全扫”，那是下一步。）
-    if underlying_id != "ALL":
-        target_ids = [underlying_id]
+    if underlying_id == "ALL":
+        target_ids = list(ALL_UNDERLYING_IDS)
+        intent = intent.model_copy(update={
+            "underlying_id": target_ids[0],
+            "underlying_ids": target_ids,
+        })
     else:
-        target_ids = intent.effective_underlying_ids
+        target_ids = [underlying_id]
 
     all_resolved: List[ResolvedStrategy] = []
 
