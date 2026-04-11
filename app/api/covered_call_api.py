@@ -34,6 +34,13 @@ class CoveredCallScanRequest(BaseModel):
 
 @router.post("/covered-call")
 def covered_call_scan(req: CoveredCallScanRequest) -> Dict[str, Any]:
+    """
+    Authoritative API surface for the dedicated covered-call scan flow.
+
+    This route intentionally delegates to app.strategy.covered_call_service.
+    The generic advisor-path covered_call strategy expression and scoring stay
+    in app.strategy.compiler and app.strategy.strategy_ranker.
+    """
     rules = [r.model_dump() for r in req.target_upside_rules] if req.target_upside_rules else None
 
     data = run_covered_call_scan(

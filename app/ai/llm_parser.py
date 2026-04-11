@@ -2,11 +2,9 @@ import json
 import time
 from typing import Optional
 
-import anthropic
+from app.ai.client import DEFAULT_ANTHROPIC_MODEL, get_anthropic_client
 
-from app.core.config import ANTHROPIC_API_KEY
-
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+client = get_anthropic_client()
 
 SYSTEM_PROMPT = """你是一个A股ETF期权交易意图解析器。
 用户会用自然语言描述市场判断和交易需求，解析成结构化JSON。
@@ -193,7 +191,7 @@ def parse_with_llm(
 
     try:
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=DEFAULT_ANTHROPIC_MODEL,
             max_tokens=768,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],

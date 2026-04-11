@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""
+Dedicated covered-call scan service.
+
+This module is the authoritative implementation for the explicit
+covered-call scan API exposed by app.api.covered_call_api.
+
+It is separate from the generic advisor-path covered_call strategy
+expression/scoring that remains in app.strategy.compiler and
+app.strategy.strategy_ranker.
+"""
+
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
@@ -288,6 +299,12 @@ def run_covered_call_scan(
     top_n: int = 3,
     target_upside_rules: Optional[List[Dict[str, float]]] = None,
 ) -> Dict[str, Any]:
+    """
+    Authoritative entrypoint for the dedicated covered-call scan flow.
+
+    Keep this separate from the generic advisor pipeline's covered_call
+    strategy expression/scoring.
+    """
     rows = fetch_covered_call_candidates(
         eng=engine,
         underlying_id=underlying_id,

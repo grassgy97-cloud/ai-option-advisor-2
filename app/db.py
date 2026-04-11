@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import os
-
-from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
-
-_ENGINE: Engine | None = None
+from app.core.db import SessionLocal, engine, test_connection
 
 
 def get_engine() -> Engine:
-    global _ENGINE
-    if _ENGINE is None:
-        db_url = os.getenv("DATABASE_URL")
-        if not db_url:
-            raise RuntimeError("DATABASE_URL is not set")
-        _ENGINE = create_engine(db_url, pool_pre_ping=True)
-    return _ENGINE
+    """
+    Legacy compatibility shim.
+
+    The repository's supported DB entrypoints are app.core.config and
+    app.core.db. Keep this wrapper only so older imports continue to work
+    while sharing the same engine/session objects as the active path.
+    """
+    return engine

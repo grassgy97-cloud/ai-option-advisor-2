@@ -1,11 +1,11 @@
 # briefing.py
 from __future__ import annotations
-import anthropic
-from app.core.config import ANTHROPIC_API_KEY
 
 from typing import Any, Dict, List, Optional
 
-_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+from app.ai.client import DEFAULT_ANTHROPIC_MODEL, get_anthropic_client
+
+_client = get_anthropic_client()
 
 
 _PROFIT_CONDITIONS = {
@@ -111,7 +111,7 @@ def build_briefing(
 
     try:
         resp = _client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=DEFAULT_ANTHROPIC_MODEL,
             max_tokens=500,
             system=system,
             messages=[{"role": "user", "content": ctx}],

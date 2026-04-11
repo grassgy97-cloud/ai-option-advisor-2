@@ -617,6 +617,8 @@ def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
         else:
             delta_score = 0.3
 
+    # Advisor-path covered_call scoring only.
+    # Dedicated covered-call scan ranking lives in app.strategy.covered_call_service.
     elif strategy.strategy_type == "covered_call":
         FEE_PER_SHARE = 0.0004
         spot   = strategy.spot_price or 0
@@ -806,6 +808,8 @@ def _score_generic_strategy(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
 # ============================================================
 
 _SINGLE_LEG_TYPES   = ("naked_call", "naked_put", "covered_call", "long_call", "long_put")
+# covered_call stays in the general advisor-path single-leg set.
+# This does not replace the dedicated covered-call scan service.
 _VERTICAL_TYPES     = ("bear_call_spread", "bull_put_spread", "bull_call_spread", "bear_put_spread")
 _DEBIT_VERTICAL     = ("bull_call_spread", "bear_put_spread")
 _CALENDAR_TYPES     = ("call_calendar", "put_calendar")

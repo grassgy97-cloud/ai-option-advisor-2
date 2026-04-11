@@ -1,3 +1,12 @@
+"""
+Legacy helper for older underlying metadata / IV-context lookups.
+
+This module is not on the active advisor path. It still references the legacy
+`underlying_master` table and is kept only for compatibility/manual use.
+
+The current advisor pipeline relies on the newer snapshot/context modules.
+"""
+
 from sqlalchemy import text
 from app.core.db import SessionLocal
 
@@ -63,19 +72,20 @@ UNDERLYING_KNOWLEDGE = {
 
 
 def get_underlying_info(underlying_id: str) -> dict:
-    """获取标的静态描述信息"""
+    """Legacy/manual static underlying descriptor lookup."""
     return UNDERLYING_KNOWLEDGE.get(underlying_id, {})
 
 
 def get_all_underlyings() -> list:
-    """获取所有标的列表"""
+    """Legacy/manual list of underlying ids from the old knowledge map."""
     return list(UNDERLYING_KNOWLEDGE.keys())
 
 
 def get_iv_context(underlying_id: str, current_iv: float) -> dict:
     """
-    评估当前IV相对于历史水平的位置
-    完全从数据库读，无数据则返回空，不用假数据兜底
+    Legacy/manual IV-context lookup against the old `underlying_master` table.
+
+    This is not used by the active advisor pipeline.
     """
     if current_iv is None:
         return {}

@@ -311,23 +311,6 @@ def scan_term_structure(
     return results
 
 
-def scan_static(
-    engine: Engine,
-    underlying_id: str = "510300",
-) -> Dict[str, Any]:
-    """
-    给 /scan/static 用的统一入口
-    """
-    factor_rows = fetch_latest_factor_rows(engine, underlying_id)
-
-    return {
-        "underlying_id": underlying_id,
-        "factor_row_count": len(factor_rows),
-        "iv_skew": scan_iv_skew(engine, underlying_id),
-        "term_structure_call": scan_term_structure(engine, underlying_id, option_type="CALL"),
-        "term_structure_put": scan_term_structure(engine, underlying_id, option_type="PUT"),
-    }
-
 def fetch_latest_quote_rows(engine: Engine, underlying_id: str) -> List[Dict[str, Any]]:
     sql = text(
         """

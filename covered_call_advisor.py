@@ -1,8 +1,14 @@
 """
-covered_call_advisor.py
-备兑策略专项推荐——针对已持仓标的（510300 x2手，588000 x4手）
+Legacy/manual covered-call helper script.
 
-使用：python covered_call_advisor.py
+This file is not the authoritative covered-call implementation for the app.
+The supported dedicated covered-call scan path is
+app.strategy.covered_call_service via app.api.covered_call_api.
+
+The generic advisor-path covered_call strategy expression/scoring remains in
+app.strategy.compiler and app.strategy.strategy_ranker.
+
+Usage: python covered_call_advisor.py
 """
 from __future__ import annotations
 

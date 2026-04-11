@@ -410,6 +410,8 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
             metadata={"selection_mode": "naked_single"},
         )
 
+    # Advisor-path covered_call expression only.
+    # The dedicated covered-call scan path lives in app.strategy.covered_call_service.
     if strategy_type == "covered_call":
         short_pct = resistance
         return StrategySpec(

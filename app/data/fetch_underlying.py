@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""
+Legacy/manual helper for populating old underlying snapshot tables.
+
+This module is not part of the active advisor data path. It writes to the
+legacy `underlying_quote` table and remains only for compatibility/manual use.
+
+The current advisor pipeline uses the newer snapshot-based data flow instead.
+"""
+
 from datetime import datetime
 from decimal import Decimal
 import os
@@ -51,6 +60,9 @@ def _safe_decimal(val: object) -> Decimal | None:
 
 
 def fetch_underlying_snapshot() -> dict:
+    """
+    Legacy/manual fetch entrypoint for the old `underlying_quote` table.
+    """
     df = ak.fund_etf_spot_ths()
     if df is None or df.empty:
         return {"rows_fetched": 0, "rows_written": 0, "message": "AKShare 未返回ETF数据"}
