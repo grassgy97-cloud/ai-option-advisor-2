@@ -14,6 +14,27 @@ from app.strategy.greeks_monitor import compute_strategy_net_greeks
 
 logger = logging.getLogger(__name__)
 
+_OPPORTUNITY_COMPONENT_KEYS = (
+    "signal_score",
+    "iv_diff_score",
+    "iv_score",
+)
+_STRUCTURE_COMPONENT_KEYS = (
+    "moneyness_score",
+    "near_delta_score",
+    "delta_spread_score",
+    "delta_score",
+    "theta_score",
+    "gamma_score",
+    "vega_score",
+    "sell_delta_score",
+    "buy_delta_score",
+)
+_EXECUTION_COMPONENT_KEYS = (
+    "liquidity_score",
+    "cost_score",
+)
+
 
 def _avg_rel_spread(strategy: ResolvedStrategy) -> float:
     spreads = []
@@ -23,6 +44,61 @@ def _avg_rel_spread(strategy: ResolvedStrategy) -> float:
     if not spreads:
         return 1.0
     return sum(spreads) / len(spreads)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _collect_component_values(
+    breakdown: Dict[str, Any],
+    keys: Tuple[str, ...],
+) -> List[float]:
+    values: List[float] = []
+    for key in keys:
+        value = breakdown.get(key)
+        if value is None:
+            continue
+        try:
+            values.append(_clamp01(float(value)))
+        except Exception:
+            continue
+    return values
+
+
+def _average_component(values: List[float], default: float = 0.5) -> float:
+    if not values:
+        return round(default, 4)
+    return round(sum(values) / len(values), 4)
+
+
+def _build_ranking_components(
+    breakdown: Dict[str, Any],
+    greeks_adj: float,
+    greeks_intent_adj: float,
+    prior_adj: float,
+) -> Dict[str, float]:
+    opportunity_values = _collect_component_values(breakdown, _OPPORTUNITY_COMPONENT_KEYS)
+    opportunity_values.extend([
+        _clamp01(greeks_intent_adj),
+        _clamp01(prior_adj),
+    ])
+
+    structure_values = _collect_component_values(breakdown, _STRUCTURE_COMPONENT_KEYS)
+    structure_values.append(_clamp01(greeks_adj))
+    if not structure_values and "signal_score" in breakdown:
+        try:
+            structure_values.append(_clamp01(float(breakdown["signal_score"])))
+        except Exception:
+            pass
+
+    execution_values = _collect_component_values(breakdown, _EXECUTION_COMPONENT_KEYS)
+
+    return {
+        "opportunity_fit": _average_component(opportunity_values),
+        "structure_quality": _average_component(structure_values),
+        "execution_quality": _average_component(execution_values),
+    }
 
 
 def _liquidity_score(strategy: ResolvedStrategy) -> float:
@@ -887,19 +963,37 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
         # ── 5. final score ──
         # 公式：base × greeks_adj × greeks_intent_adj × prior_adj
         final_score = base_score * adj * greeks_intent_adj * prior_adj
+        ranking_components = _build_ranking_components(
+            breakdown=breakdown,
+            greeks_adj=adj,
+            greeks_intent_adj=greeks_intent_adj,
+            prior_adj=prior_adj,
+        )
 
         breakdown["greeks_adj"]        = round(adj, 4)
         breakdown["greeks_intent_adj"] = round(greeks_intent_adj, 4)
         breakdown["prior"]             = round(prior, 4)
         breakdown["prior_adj"]         = round(prior_adj, 4)
+        breakdown["opportunity_fit"]   = ranking_components["opportunity_fit"]
+        breakdown["structure_quality"] = ranking_components["structure_quality"]
+        breakdown["execution_quality"] = ranking_components["execution_quality"]
 
         strategy.score           = round(final_score, 4)
         strategy.score_breakdown = breakdown
+        strategy.metadata = strategy.metadata or {}
+        strategy.metadata["ranking_components"] = ranking_components
 
         print(
             f"[rank] {st:<22} base={base_score:.3f} "
             f"adj={adj:.3f} intent_adj={greeks_intent_adj:.3f} "
             f"prior={prior:.2f} final={final_score:.3f}"
+        )
+        print(
+            f"[rank_explain] strategy={st} "
+            f"opp={ranking_components['opportunity_fit']:.3f} "
+            f"structure={ranking_components['structure_quality']:.3f} "
+            f"exec={ranking_components['execution_quality']:.3f} "
+            f"final={final_score:.3f}"
         )
 
         ranked.append(strategy)

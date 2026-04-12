@@ -175,10 +175,13 @@ HTML_PAGE = """<!DOCTYPE html>
     border-radius: 10px;
     padding: 14px 16px;
     margin-bottom: 16px;
-    display: flex;
+    display: none;
     flex-wrap: wrap;
     gap: 12px;
     align-items: flex-end;
+  }
+  .cc-panel.visible {
+    display: flex;
   }
   .cc-item {
     display: flex;
@@ -359,7 +362,7 @@ HTML_PAGE = """<!DOCTYPE html>
   </div>
 </div>
 
-<div class="cc-panel">
+<div id="cc-panel" class="cc-panel">
   <div class="cc-item">
     <label>持仓手数</label>
     <input id="cc-hands" type="number" value="2" min="1">
@@ -445,8 +448,28 @@ HTML_PAGE = """<!DOCTYPE html>
 </div>
 
 <script>
+let coveredCallMode = false;
+
 function setShortcut(text) {
   document.getElementById('text').value = text;
+}
+
+function isExplicitCoveredCallMode() {
+  const params = new URLSearchParams(window.location.search);
+  const mode = (params.get('mode') || '').toLowerCase();
+  return mode === 'covered-call' || mode === 'covered_call';
+}
+
+function setCoveredCallMode(enabled) {
+  coveredCallMode = !!enabled;
+  const panel = document.getElementById('cc-panel');
+  const coveredBtn = document.getElementById('btn-covered');
+  if (panel) {
+    panel.classList.toggle('visible', coveredCallMode);
+  }
+  if (coveredBtn) {
+    coveredBtn.textContent = coveredCallMode ? '运行备兑扫描' : '备兑扫描';
+  }
 }
 
 function getSelectedUnderlyings() {
@@ -487,6 +510,7 @@ function clearResultArea() {
 }
 
 async function runAdvisor() {
+  setCoveredCallMode(false);
   const text = document.getElementById('text').value.trim();
   if (!text) return;
 
@@ -548,6 +572,16 @@ async function runAdvisor() {
 }
 
 async function runCoveredCall() {
+  if (!coveredCallMode) {
+    setCoveredCallMode(true);
+    const status = document.getElementById('status');
+    status.className = '';
+    status.textContent = '已展开备兑参数，请确认后再次点击“运行备兑扫描”。';
+    const firstInput = document.getElementById('cc-hands');
+    if (firstInput) firstInput.focus();
+    return;
+  }
+
   const selectedIds = getSelectedUnderlyings();
   const isAll = selectedIds.includes('ALL');
   const underlyingId = isAll ? '510300' : selectedIds[0];
@@ -772,6 +806,8 @@ document.getElementById('text').addEventListener('keydown', e => {
     runAdvisor();
   }
 });
+
+setCoveredCallMode(isExplicitCoveredCallMode());
 </script>
 </body>
 </html>
