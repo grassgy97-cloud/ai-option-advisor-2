@@ -67,6 +67,12 @@ _VERTICAL_STRATEGY_TYPES = (
     "bull_put_spread",
     "bear_put_spread",
 )
+_FAMILY_DIAG_STRATEGY_TYPES = (
+    "naked_call",
+    "naked_put",
+    "iron_condor",
+    "iron_fly",
+)
 
 _OPPORTUNITY_FAMILY_WEIGHTS: Dict[OpportunityType, Dict[StrategyFamily, float]] = {
     "directional_defined_risk": {"vertical": 1.0},
@@ -90,6 +96,29 @@ _GATE_FAILED_FAMILY_MIN_SCORE = 0.50
 
 def _clip01(v: float) -> float:
     return max(0.0, min(1.0, v))
+
+
+def _family_diag_presence(strategy_types: Any) -> Dict[str, bool]:
+    active = set(strategy_types or [])
+    return {strategy_type: (strategy_type in active) for strategy_type in _FAMILY_DIAG_STRATEGY_TYPES}
+
+
+def _family_diag_reason_bucket(reason: Optional[str]) -> str:
+    text = (reason or "").lower()
+    if "require_defined_risk".lower() in text or "defined_risk" in text:
+        return "blocked_by_defined_risk"
+    if "allowed_families" in text:
+        return "blocked_by_allowed_families"
+    if "spec" in text and "none" in text:
+        return "spec_not_built"
+    if "not shortlisted" in text or "family missing" in text:
+        return "not_shortlisted"
+    return reason or "not_shortlisted"
+
+
+def _family_diag_log(uid: str, stage: str, **fields: Any) -> None:
+    payload = " ".join(f"{key}={fields[key]}" for key in fields)
+    print(f"[family_diag] uid={uid} stage={stage} {payload}".rstrip())
 
 
 def _vertical_presence(keys: List[str] | set[str] | tuple[str, ...]) -> Dict[str, bool]:
@@ -1477,6 +1506,11 @@ def compile_intent_to_strategies(
 
     # ===== best_map：各策略取最高prior =====
     seeded_types = [strategy_type for strategy_type, _ in candidates]
+    _family_diag_log(
+        intent.underlying_id,
+        "seeded",
+        **_family_diag_presence(seeded_types),
+    )
     print(
         "[vertical_trace] "
         f"uid={intent.underlying_id} "
@@ -1611,6 +1645,12 @@ def compile_intent_to_strategies(
         for k in ("naked_call", "naked_put"):
             best_map.pop(k, None)
 
+    best_map_before_family_keys = list(best_map.keys())
+    _family_diag_log(
+        intent.underlying_id,
+        "best_map_before_family_filter",
+        **_family_diag_presence(best_map_before_family_keys),
+    )
     print(
         "[vertical_trace] "
         f"uid={intent.underlying_id} "
@@ -1635,6 +1675,27 @@ def compile_intent_to_strategies(
         f"vertical_shortlisted={vertical_family_candidate.shortlisted if vertical_family_candidate is not None else False} "
         f"reasons={(vertical_family_candidate.shortlist_reasons if vertical_family_candidate is not None else ['vertical_family_missing'])}"
     )
+    for strategy_type in _FAMILY_DIAG_STRATEGY_TYPES:
+        family = _strategy_family_for_type(strategy_type)
+        family_candidate = family_candidate_map.get(family)
+        present_before_shortlist = strategy_type in best_map_before_family_keys
+        shortlisted = bool(family_candidate is not None and family_candidate.shortlisted and present_before_shortlist)
+        raw_reason = None
+        if not present_before_shortlist:
+            raw_reason = "not_shortlisted"
+        elif family_candidate is None:
+            raw_reason = "family_missing"
+        elif family_candidate.shortlisted:
+            raw_reason = "|".join(family_candidate.shortlist_reasons or ["compatible family retained"])
+        else:
+            raw_reason = "|".join(family_candidate.shortlist_reasons or ["not_shortlisted"])
+        _family_diag_log(
+            intent.underlying_id,
+            "shortlist",
+            strategy=strategy_type,
+            shortlisted=shortlisted,
+            reason=_family_diag_reason_bucket(raw_reason),
+        )
     shortlisted_families = {
         family
         for family in {_strategy_family_for_type(strategy_type) for strategy_type in best_map}
@@ -1659,6 +1720,16 @@ def compile_intent_to_strategies(
         family_candidate_map=family_candidate_map,
         intent=intent,
     )
+    inserted_after_shortlist = [
+        strategy_type for strategy_type in _FAMILY_DIAG_STRATEGY_TYPES
+        if strategy_type in best_map and strategy_type not in best_map_before_family_keys
+    ]
+    _family_diag_log(
+        intent.underlying_id,
+        "backfill",
+        triggered=bool(inserted_after_shortlist),
+        inserted=inserted_after_shortlist,
+    )
     print(
         "[vertical_trace] "
         f"uid={intent.underlying_id} "
@@ -1681,6 +1752,15 @@ def compile_intent_to_strategies(
                 f"strategy_type={vertical_type} "
                 "result=not_attempted"
             )
+    for strategy_type in _FAMILY_DIAG_STRATEGY_TYPES:
+        if strategy_type not in best_map:
+            _family_diag_log(
+                intent.underlying_id,
+                "build_strategy_spec",
+                strategy=strategy_type,
+                attempted=False,
+                reason="spec_not_built",
+            )
 
     specs: List[StrategySpec] = []
     for strategy_type, weight in best_map.items():
@@ -1692,6 +1772,15 @@ def compile_intent_to_strategies(
                 "stage=build_strategy_spec "
                 f"strategy_type={strategy_type} "
                 f"result={'valid_spec' if spec is not None else 'none'}"
+            )
+        if strategy_type in _FAMILY_DIAG_STRATEGY_TYPES:
+            _family_diag_log(
+                intent.underlying_id,
+                "build_strategy_spec",
+                strategy=strategy_type,
+                attempted=True,
+                result="valid_spec" if spec is not None else "none",
+                reason="ok" if spec is not None else "spec_not_built",
             )
         if spec is None:
             continue
@@ -1752,6 +1841,11 @@ def compile_intent_to_strategies(
         f"specs={len(specs)}"
     )
     final_types = [spec.strategy_type for spec in specs]
+    _family_diag_log(
+        intent.underlying_id,
+        "final_specs",
+        **_family_diag_presence(final_types),
+    )
     print(
         "[vertical_trace] "
         f"uid={intent.underlying_id} "

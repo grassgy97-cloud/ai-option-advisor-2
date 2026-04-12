@@ -37,6 +37,13 @@ ALL_UNDERLYING_IDS = [
     "588000", "588080",
     "159915", "159901", "159919", "159922",
 ]
+_FAMILY_DIAG_STRATEGY_TYPES = (
+    "naked_call",
+    "naked_put",
+    "iron_condor",
+    "iron_fly",
+)
+_FAMILY_DIAG_TOP_N = 5
 
 _VALID_STRATEGY_NAMES = {
     "bear_call_spread",
@@ -498,6 +505,13 @@ def run_advisor(
 
     all_resolved: List[ResolvedStrategy] = []
     compile_resolve_summary: List[Dict[str, Any]] = []
+    family_diag_tracker: Dict[str, Dict[str, Dict[str, int]]] = {
+        uid: {
+            strategy_type: {"compiled": 0, "resolved": 0}
+            for strategy_type in _FAMILY_DIAG_STRATEGY_TYPES
+        }
+        for uid in target_ids
+    }
 
     for uid in target_ids:
         t0_uid = time.perf_counter()
@@ -508,6 +522,11 @@ def run_advisor(
         t0 = time.perf_counter()
         candidate_specs = compile_intent_to_strategies(uid_intent, iv_pct=iv_pct)
         print(f"[timing] {uid} compile_intent_to_strategies = {time.perf_counter() - t0:.3f}s, specs={len(candidate_specs)}")
+        for strategy_type in _FAMILY_DIAG_STRATEGY_TYPES:
+            family_diag_tracker.setdefault(uid, {}).setdefault(strategy_type, {"compiled": 0, "resolved": 0})
+            family_diag_tracker[uid][strategy_type]["compiled"] = sum(
+                1 for spec in candidate_specs if spec.strategy_type == strategy_type
+            )
         summary_item: Dict[str, Any] = {
             "underlying_id": uid,
             "compiled_specs": len(candidate_specs),
@@ -533,9 +552,18 @@ def run_advisor(
                     rs.metadata["iv_pct"] = iv_pct
                     all_resolved.append(rs)
                     resolved_count += 1
+                    if spec.strategy_type in _FAMILY_DIAG_STRATEGY_TYPES:
+                        family_diag_tracker[uid][spec.strategy_type]["resolved"] += 1
             except Exception as e:
                 print(f"[run_advisor] {uid} {spec.strategy_type} failed: {e}")
         print(f"[timing] {uid} resolve all specs = {time.perf_counter() - t0:.3f}s, resolved={resolved_count}")
+        for strategy_type in _FAMILY_DIAG_STRATEGY_TYPES:
+            stats = family_diag_tracker[uid][strategy_type]
+            print(
+                f"[family_diag] uid={uid} stage=resolver_count "
+                f"strategy={strategy_type} attempted={stats['compiled'] > 0} "
+                f"compiled={stats['compiled']} resolved={stats['resolved']}"
+            )
         summary_item["resolved"] = resolved_count
         compile_resolve_summary.append(summary_item)
 
@@ -553,6 +581,33 @@ def run_advisor(
     t0 = time.perf_counter()
     ranked = rank_strategies(all_resolved)
     print(f"[timing] rank_strategies = {time.perf_counter() - t0:.3f}s, ranked={len(ranked)}")
+    top_ranked = ranked[:min(_FAMILY_DIAG_TOP_N, len(ranked))]
+    top_cutoff = top_ranked[-1].score if top_ranked else None
+    for uid in target_ids:
+        for strategy_type in _FAMILY_DIAG_STRATEGY_TYPES:
+            resolved_matches = [
+                s for s in ranked
+                if s.underlying_id == uid and s.strategy_type == strategy_type
+            ]
+            if not resolved_matches:
+                stats = family_diag_tracker.get(uid, {}).get(strategy_type, {"compiled": 0, "resolved": 0})
+                if stats.get("compiled", 0) > 0:
+                    print(
+                        f"[family_diag] uid={uid} stage=ranking strategy={strategy_type} "
+                        f"final_score=None top_n_cutoff={top_cutoff} reason=not_resolved"
+                    )
+                continue
+
+            best_match = max(resolved_matches, key=lambda s: s.score or 0.0)
+            in_top_results = any(
+                s.underlying_id == uid and s.strategy_type == strategy_type
+                for s in top_ranked
+            )
+            print(
+                f"[family_diag] uid={uid} stage=ranking strategy={strategy_type} "
+                f"final_score={best_match.score} top_n_cutoff={top_cutoff} "
+                f"reason={'in_top_results' if in_top_results else 'ranked_below_cutoff'}"
+            )
 
     # 这里改为复用前面已经算过的 iv_reports，避免每个策略再次查库
     t0 = time.perf_counter()

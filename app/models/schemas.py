@@ -238,7 +238,9 @@ class ResolvedStrategy(BaseModel):
     net_credit: Optional[float] = None
     net_debit: Optional[float] = None
     score: Optional[float] = None
-    score_breakdown: Dict[str, float] = Field(default_factory=dict)
+    # Ranking explainability is mostly numeric, but some additive fields such as
+    # iv_side_used / iv_expression are categorical labels.
+    score_breakdown: Dict[str, Any] = Field(default_factory=dict)
     rationale: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

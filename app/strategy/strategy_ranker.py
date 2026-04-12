@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 _OPPORTUNITY_COMPONENT_KEYS = (
     "signal_score",
     "iv_diff_score",
-    "iv_score",
+    "iv_alignment_score",
 )
 _STRUCTURE_COMPONENT_KEYS = (
     "moneyness_score",
@@ -34,6 +34,39 @@ _EXECUTION_COMPONENT_KEYS = (
     "liquidity_score",
     "cost_score",
 )
+
+_CALL_SIDE_STRATEGIES = {
+    "long_call",
+    "bull_call_spread",
+    "bear_call_spread",
+    "call_calendar",
+    "diagonal_call",
+    "naked_call",
+    "covered_call",
+}
+_PUT_SIDE_STRATEGIES = {
+    "long_put",
+    "bear_put_spread",
+    "bull_put_spread",
+    "put_calendar",
+    "diagonal_put",
+    "naked_put",
+}
+_LONG_PREMIUM_STRATEGIES = {
+    "long_call",
+    "long_put",
+    "bull_call_spread",
+    "bear_put_spread",
+}
+_SHORT_PREMIUM_STRATEGIES = {
+    "naked_call",
+    "naked_put",
+    "covered_call",
+    "bear_call_spread",
+    "bull_put_spread",
+    "iron_condor",
+    "iron_fly",
+}
 
 
 def _avg_rel_spread(strategy: ResolvedStrategy) -> float:
@@ -223,6 +256,87 @@ def _extract_iv_pct(strategy: ResolvedStrategy) -> float:
         return float(sm.get("iv_pct", 0.5) or 0.5)
     except Exception:
         return 0.5
+
+
+def _extract_strategy_aware_iv_signal(strategy: ResolvedStrategy) -> Dict[str, Any]:
+    iv_side = "atm"
+    st = strategy.strategy_type
+    if st in _CALL_SIDE_STRATEGIES:
+        iv_side = "call"
+    elif st in _PUT_SIDE_STRATEGIES:
+        iv_side = "put"
+
+    expression = "neutral"
+    if st in _LONG_PREMIUM_STRATEGIES:
+        expression = "long_premium"
+    elif st in _SHORT_PREMIUM_STRATEGIES:
+        expression = "short_premium"
+
+    iv_pct = None
+    if strategy.metadata:
+        gr = strategy.metadata.get("greeks_report", {}) or {}
+        iv_pct_data = gr.get("iv_percentile", {}) or {}
+        if isinstance(iv_pct_data, dict):
+            side_key = f"{iv_side}_iv_percentile"
+            side_payload = iv_pct_data.get(side_key)
+            if isinstance(side_payload, dict):
+                v = side_payload.get("composite_percentile")
+                if v is not None:
+                    try:
+                        iv_pct = float(v)
+                    except Exception:
+                        iv_pct = None
+            if iv_pct is None:
+                v = iv_pct_data.get("composite_percentile")
+                if v is not None:
+                    try:
+                        iv_pct = float(v)
+                    except Exception:
+                        iv_pct = None
+
+    if iv_pct is None:
+        iv_pct = _extract_iv_pct(strategy)
+
+    if expression == "neutral" or iv_pct is None:
+        return {
+            "iv_side_used": iv_side,
+            "iv_percentile_used": round(float(iv_pct), 4) if iv_pct is not None else None,
+            "iv_signal_strength": 0.0,
+            "iv_alignment_score": 0.5,
+            "iv_expression": expression,
+        }
+
+    if 0.35 <= iv_pct <= 0.65:
+        return {
+            "iv_side_used": iv_side,
+            "iv_percentile_used": round(iv_pct, 4),
+            "iv_signal_strength": 0.0,
+            "iv_alignment_score": 0.5,
+            "iv_expression": expression,
+        }
+
+    if expression == "long_premium":
+        if iv_pct < 0.35:
+            signal_strength = min(1.0, (0.35 - iv_pct) / 0.20)
+            alignment_score = 0.5 + 0.5 * signal_strength
+        else:
+            signal_strength = min(1.0, (iv_pct - 0.65) / 0.20)
+            alignment_score = 0.5 - 0.20 * signal_strength
+    else:
+        if iv_pct > 0.65:
+            signal_strength = min(1.0, (iv_pct - 0.65) / 0.20)
+            alignment_score = 0.5 + 0.5 * signal_strength
+        else:
+            signal_strength = min(1.0, (0.35 - iv_pct) / 0.20)
+            alignment_score = 0.5 - 0.20 * signal_strength
+
+    return {
+        "iv_side_used": iv_side,
+        "iv_percentile_used": round(iv_pct, 4),
+        "iv_signal_strength": round(signal_strength, 4),
+        "iv_alignment_score": round(_clamp01(alignment_score), 4),
+        "iv_expression": expression,
+    }
 
 
 def _extract_greeks_preference(strategy: ResolvedStrategy) -> Dict[str, Any]:
@@ -676,7 +790,7 @@ def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
     leg_strike_forced = getattr(leg, "strike_forced", False)
 
     vega_score: float  = 0.0
-    iv_score: float    = 0.0
+    iv_score: float    = 0.5
     theta_score: float = 0.0
 
     if strategy.strategy_type in ("naked_call", "naked_put"):
@@ -765,9 +879,6 @@ def _score_single_leg(strategy: ResolvedStrategy) -> Tuple[float, Dict]:
         spot = strategy.spot_price or 1.0
         vega_normalized = raw_vega / spot
         vega_score = min(1.0, vega_normalized / 0.0018)
-
-        iv_pct   = _extract_iv_pct(strategy)
-        iv_score = 1.0 - iv_pct
 
         raw_theta   = abs(leg.theta) if leg.theta is not None else 0.004
         theta_score = max(0.0, 1.0 - raw_theta / 0.0015)
@@ -913,6 +1024,11 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
         else:
             base_score, breakdown = _score_generic_strategy(strategy)
 
+        iv_signal = _extract_strategy_aware_iv_signal(strategy)
+        iv_alignment_score = float(iv_signal.get("iv_alignment_score", 0.5) or 0.5)
+        iv_opportunity_adj = 1.0 + 0.20 * (iv_alignment_score - 0.5)
+        base_score *= iv_opportunity_adj
+
         # ── 2. Greeks结构调整（基于策略本身的Greeks质量）──
         greeks    = compute_strategy_net_greeks(strategy)
         net_delta = greeks.get("net_delta")
@@ -974,6 +1090,14 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
         breakdown["greeks_intent_adj"] = round(greeks_intent_adj, 4)
         breakdown["prior"]             = round(prior, 4)
         breakdown["prior_adj"]         = round(prior_adj, 4)
+        breakdown["iv_side_used"]      = iv_signal["iv_side_used"]
+        breakdown["iv_percentile_used"] = iv_signal["iv_percentile_used"]
+        breakdown["iv_signal_strength"] = iv_signal["iv_signal_strength"]
+        breakdown["iv_alignment_score"] = iv_signal["iv_alignment_score"]
+        breakdown["iv_expression"]      = iv_signal["iv_expression"]
+        breakdown["iv_opportunity_adj"] = round(iv_opportunity_adj, 4)
+        if "iv_score" in breakdown:
+            breakdown["iv_score"] = round(iv_alignment_score, 4)
         breakdown["opportunity_fit"]   = ranking_components["opportunity_fit"]
         breakdown["structure_quality"] = ranking_components["structure_quality"]
         breakdown["execution_quality"] = ranking_components["execution_quality"]
@@ -982,6 +1106,13 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
         strategy.score_breakdown = breakdown
         strategy.metadata = strategy.metadata or {}
         strategy.metadata["ranking_components"] = ranking_components
+        strategy.metadata["ranking_components"].update({
+            "iv_side_used": iv_signal["iv_side_used"],
+            "iv_percentile_used": iv_signal["iv_percentile_used"],
+            "iv_signal_strength": iv_signal["iv_signal_strength"],
+            "iv_alignment_score": iv_signal["iv_alignment_score"],
+            "iv_expression": iv_signal["iv_expression"],
+        })
 
         print(
             f"[rank] {st:<22} base={base_score:.3f} "
@@ -993,6 +1124,13 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
             f"opp={ranking_components['opportunity_fit']:.3f} "
             f"structure={ranking_components['structure_quality']:.3f} "
             f"exec={ranking_components['execution_quality']:.3f} "
+            f"final={final_score:.3f}"
+        )
+        print(
+            f"[rank_iv_refine] strategy={st} "
+            f"iv_side={iv_signal['iv_side_used']} "
+            f"iv_pct={iv_signal['iv_percentile_used']} "
+            f"iv_signal={iv_signal['iv_signal_strength']:.3f} "
             f"final={final_score:.3f}"
         )
 

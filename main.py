@@ -1,8 +1,9 @@
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+
 from app.api.advisor_v2 import router as advisor_router
-from app.api.scanner_v2 import router as scanner_router
 from app.api.covered_call_api import router as covered_call_router
+from app.api.scanner_v2 import router as scanner_router
 
 app = FastAPI(title="AI Option Advisor")
 
@@ -44,14 +45,13 @@ HTML_PAGE = """<!DOCTYPE html>
     margin-bottom: 8px;
     align-items: flex-start;
   }
-
   .underlying-panel {
     background: #1e2130;
     border: 1px solid #2e3250;
     border-radius: 8px;
     padding: 8px 10px;
-    min-width: 160px;
-    max-width: 180px;
+    min-width: 170px;
+    max-width: 190px;
     flex-shrink: 0;
   }
   .underlying-panel .panel-title {
@@ -62,13 +62,19 @@ HTML_PAGE = """<!DOCTYPE html>
     justify-content: space-between;
     align-items: center;
   }
-  .underlying-panel .panel-title a {
+  .underlying-panel .panel-title button {
+    height: auto;
+    padding: 0;
+    background: transparent;
     color: #4a6cf7;
-    cursor: pointer;
     font-size: 11px;
-    text-decoration: none;
+    border: none;
+    cursor: pointer;
   }
-  .underlying-panel .panel-title a:hover { text-decoration: underline; }
+  .underlying-panel .panel-title button:hover {
+    background: transparent;
+    text-decoration: underline;
+  }
   .underlying-panel label {
     display: flex;
     align-items: center;
@@ -91,7 +97,6 @@ HTML_PAGE = """<!DOCTYPE html>
     border-top: 1px solid #2e3250;
     margin: 6px 0;
   }
-
   .text-area-wrap {
     flex: 1;
     display: flex;
@@ -107,9 +112,13 @@ HTML_PAGE = """<!DOCTYPE html>
     border-radius: 8px;
     font-size: 14px;
     resize: vertical;
-    min-height: 80px;
+    min-height: 84px;
     line-height: 1.6;
     font-family: inherit;
+  }
+  textarea:focus {
+    outline: none;
+    border-color: #4a6cf7;
   }
   .textarea-hint {
     font-size: 11px;
@@ -117,11 +126,6 @@ HTML_PAGE = """<!DOCTYPE html>
     line-height: 1.5;
     padding: 0 2px;
   }
-  textarea:focus {
-    outline: none;
-    border-color: #4a6cf7;
-  }
-
   .button-col {
     display: flex;
     flex-direction: column;
@@ -144,11 +148,44 @@ HTML_PAGE = """<!DOCTYPE html>
   }
   button:hover { background: #3a5ce7; }
   button:disabled { background: #2e3250; color: #666; cursor: not-allowed; }
-  #btn-covered {
-    background: #1f8f5f;
+  #btn-covered { background: #1f8f5f; }
+  #btn-covered:hover { background: #18724c; }
+
+  .cc-panel {
+    background: #1a1d2e;
+    border: 1px solid #2e3250;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+    display: none;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
   }
-  #btn-covered:hover {
-    background: #18724c;
+  .cc-panel.visible { display: flex; }
+  .cc-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .cc-item label {
+    font-size: 11px;
+    color: #6b7280;
+  }
+  .cc-item input {
+    width: 110px;
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid #2e3250;
+    background: #0f1117;
+    color: #e0e0e0;
+  }
+  .cc-item.wide input { width: 140px; }
+  .cc-note {
+    font-size: 11px;
+    color: #6b7280;
+    max-width: 420px;
+    line-height: 1.5;
   }
 
   .shortcuts {
@@ -167,47 +204,9 @@ HTML_PAGE = """<!DOCTYPE html>
     cursor: pointer;
     transition: all 0.15s;
   }
-  .shortcut:hover { border-color: #4a6cf7; color: #fff; }
-
-  .cc-panel {
-    background: #1a1d2e;
-    border: 1px solid #2e3250;
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin-bottom: 16px;
-    display: none;
-    flex-wrap: wrap;
-    gap: 12px;
-    align-items: flex-end;
-  }
-  .cc-panel.visible {
-    display: flex;
-  }
-  .cc-item {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .cc-item label {
-    font-size: 11px;
-    color: #6b7280;
-  }
-  .cc-item input {
-    width: 110px;
-    padding: 8px;
-    border-radius: 6px;
-    border: 1px solid #2e3250;
-    background: #0f1117;
-    color: #e0e0e0;
-  }
-  .cc-item.wide input {
-    width: 130px;
-  }
-  .cc-note {
-    font-size: 11px;
-    color: #6b7280;
-    max-width: 360px;
-    line-height: 1.5;
+  .shortcut:hover {
+    border-color: #4a6cf7;
+    color: #fff;
   }
 
   #status {
@@ -217,18 +216,26 @@ HTML_PAGE = """<!DOCTYPE html>
     min-height: 18px;
   }
   #status.loading { color: #4a6cf7; }
-  #status.error   { color: #ef4444; }
+  #status.error { color: #ef4444; }
 
-  #narrative {
+  #intent-bar {
     background: #1a1d2e;
     border: 1px solid #2e3250;
-    border-radius: 10px;
-    padding: 16px 20px;
-    font-size: 14px;
-    line-height: 1.7;
-    margin-bottom: 20px;
-    white-space: pre-wrap;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 12px;
+    color: #8892b0;
+    margin-bottom: 16px;
     display: none;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .badge {
+    background: #0f1117;
+    border: 1px solid #2e3250;
+    border-radius: 5px;
+    padding: 2px 8px;
+    color: #a0b0d0;
   }
   .presentation-note {
     border-radius: 8px;
@@ -248,7 +255,21 @@ HTML_PAGE = """<!DOCTYPE html>
     border: 1px solid #6b2c2c;
     color: #f5c2c2;
   }
-
+  #narrative {
+    background: #1a1d2e;
+    border: 1px solid #2e3250;
+    border-radius: 10px;
+    padding: 16px 20px;
+    font-size: 14px;
+    line-height: 1.7;
+    margin-bottom: 20px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    overflow: visible;
+    max-height: none;
+    display: none;
+  }
   .table-wrap {
     overflow-x: auto;
     margin-bottom: 20px;
@@ -275,9 +296,14 @@ HTML_PAGE = """<!DOCTYPE html>
   tr:hover td { background: #1a1d2e; }
   .rank-1 td:first-child { color: #fbbf24; font-weight: 600; }
   .score-high { color: #34d399; }
-  .score-mid  { color: #fbbf24; }
-  .score-low  { color: #f87171; }
-  .legs-cell  { font-size: 11px; color: #8892b0; max-width: 300px; line-height: 1.6; }
+  .score-mid { color: #fbbf24; }
+  .score-low { color: #f87171; }
+  .legs-cell {
+    font-size: 11px;
+    color: #8892b0;
+    max-width: 300px;
+    line-height: 1.6;
+  }
   .flag {
     display: inline-block;
     background: #2d1f1f;
@@ -289,7 +315,6 @@ HTML_PAGE = """<!DOCTYPE html>
   }
   .score-label { font-size: 10px; letter-spacing: 1px; }
   .profit-cond { font-size: 11px; color: #6ee7b7; line-height: 1.5; }
-
   .greeks {
     display: inline-flex;
     gap: 10px;
@@ -298,40 +323,38 @@ HTML_PAGE = """<!DOCTYPE html>
   }
   .greeks span { white-space: nowrap; }
 
-  #intent-bar {
-    background: #1a1d2e;
-    border: 1px solid #2e3250;
-    border-radius: 8px;
-    padding: 10px 16px;
-    font-size: 12px;
-    color: #8892b0;
-    margin-bottom: 16px;
-    display: none;
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-  .badge {
-    background: #0f1117;
-    border: 1px solid #2e3250;
-    border-radius: 5px;
-    padding: 2px 8px;
-    color: #a0b0d0;
+  @media (max-width: 960px) {
+    body { padding: 16px; }
+    .input-row {
+      flex-direction: column;
+    }
+    .underlying-panel,
+    .button-col {
+      width: 100%;
+      max-width: none;
+    }
+    .button-col {
+      flex-direction: row;
+      flex-wrap: wrap;
+    }
   }
 </style>
 </head>
 <body>
 
-<h1>📊 AI Option Advisor</h1>
+<h1>AI Option Advisor</h1>
 
 <div class="input-row">
   <div class="underlying-panel">
     <div class="panel-title">
       <span>选择标的</span>
       <span>
-        <a onclick="selectAll()">全选</a>&nbsp;/&nbsp;<a onclick="clearAll()">清空</a>
+        <button type="button" onclick="selectAll()">全选</button>
+        /
+        <button type="button" onclick="clearAll()">清空</button>
       </span>
     </div>
-    <label><input type="checkbox" value="ALL" id="chk-ALL" onchange="toggleAll(this)"> 🔍 全部扫描</label>
+    <label><input type="checkbox" value="ALL" id="chk-ALL" onchange="toggleAll(this)"> 全部扫描</label>
     <hr class="divider">
     <label><input type="checkbox" value="510300" checked> 510300 沪深300</label>
     <label><input type="checkbox" value="510050"> 510050 上证50</label>
@@ -345,81 +368,71 @@ HTML_PAGE = """<!DOCTYPE html>
   </div>
 
   <div class="text-area-wrap">
-    <textarea id="text" rows="3" placeholder="输入你的市场观点…
-
-💡 提示：
-• 用百分比表达价位，例如「下方-8%有支撑」而不是「下方4.1」
-• 可描述方向、波动率、Greeks偏好，例如「偏空，双向波动可能大，下行更多」
-• 可指定策略，例如「做裸卖put，delta控制在0.18以内」"></textarea>
+    <textarea id="text" rows="3" placeholder="输入你的市场观点，例如：
+看多但希望控制风险；
+IV 偏高，想收 theta；
+下方 8% 有支撑、上方 5% 有压力。"></textarea>
     <div class="textarea-hint">
-      ⚠️ 价位请用相对百分比（如 -8%、+5%），勿用具体点位；支持描述方向、波动预期、保底位、压力位
+      提示：价格位置尽量用相对百分比表达（如 -8%、+5%），并可同时描述方向、波动预期、支撑/压力位、Greek 偏好。
     </div>
   </div>
 
   <div class="button-col">
-    <button id="btn" onclick="runAdvisor()">分析</button>
-    <button id="btn-covered" onclick="runCoveredCall()">备兑扫描</button>
+    <button id="btn" type="button" onclick="runAdvisor()">分析</button>
+    <button id="btn-covered" type="button" onclick="runCoveredCall()">备兑扫描</button>
   </div>
 </div>
 
 <div id="cc-panel" class="cc-panel">
   <div class="cc-item">
-    <label>持仓手数</label>
+    <label for="cc-hands">持仓手数</label>
     <input id="cc-hands" type="number" value="2" min="1">
   </div>
-
   <div class="cc-item">
-    <label>最短DTE</label>
+    <label for="cc-dte-min">最短 DTE</label>
     <input id="cc-dte-min" type="number" value="60" min="1">
   </div>
-
   <div class="cc-item">
-    <label>最长DTE</label>
+    <label for="cc-dte-max">最长 DTE</label>
     <input id="cc-dte-max" type="number" value="180" min="1">
   </div>
-
   <div class="cc-item">
-    <label>目标Delta</label>
+    <label for="cc-delta-target">目标 Delta</label>
     <input id="cc-delta-target" type="number" value="0.20" step="0.01" min="0.01" max="0.99">
   </div>
-
   <div class="cc-item">
-    <label>Delta容差</label>
+    <label for="cc-delta-tolerance">Delta 容差</label>
     <input id="cc-delta-tolerance" type="number" value="0.12" step="0.01" min="0.01" max="0.50">
   </div>
-
   <div class="cc-item">
-    <label>近期限截止DTE</label>
+    <label for="cc-short-dte-max">近期限截止 DTE</label>
     <input id="cc-short-dte-max" type="number" value="120" min="1">
   </div>
-
   <div class="cc-item wide">
-    <label>近期限理想上行保护</label>
+    <label for="cc-short-buffer">近期限目标上行保护</label>
     <input id="cc-short-buffer" type="number" value="0.08" step="0.01" min="0" max="1">
   </div>
-
   <div class="cc-item wide">
-    <label>远期限理想上行保护</label>
+    <label for="cc-long-buffer">远期限目标上行保护</label>
     <input id="cc-long-buffer" type="number" value="0.10" step="0.01" min="0" max="1">
   </div>
-
   <div class="cc-item">
-    <label>Top N</label>
+    <label for="cc-top-n">Top N</label>
     <input id="cc-top-n" type="number" value="5" min="1" max="20">
   </div>
-
   <div class="cc-note">
-    说明：例如“近期限截止DTE=120，近期限理想上行保护=8%，远期限理想上行保护=10%”，表示 120 天以内按 8%，更长期按 10%。
+    说明：例如“近期限截止 DTE=120，近期限上行保护=8%，远期限上行保护=10%”表示
+    120 天以内按 8% 缓冲，更长期按 10% 缓冲筛选备兑 call。
   </div>
 </div>
 
 <div class="shortcuts">
   <span class="shortcut" onclick="setShortcut('近月认购偏贵，想做低风险跨期组合')">近月认购偏贵</span>
-  <span class="shortcut" onclick="setShortcut('我觉得300近期会涨，想做方向性策略')">看多方向</span>
-  <span class="shortcut" onclick="setShortcut('我持有300ETF现货想做备兑')">备兑增收</span>
-  <span class="shortcut" onclick="setShortcut('整体波动率偏高，想收theta')">IV偏高卖方</span>
-  <span class="shortcut" onclick="setShortcut('双向波动可能大，下行空间更多，下方-8%有支撑')">非对称波动</span>
-  <span class="shortcut" onclick="setShortcut('偏空，下行空间大，上方+5%有压力')">偏空压力位</span>
+  <span class="shortcut" onclick="setShortcut('我觉得 300 近期会涨，想做方向性策略')">看多方向</span>
+  <span class="shortcut" onclick="setShortcut('我持有 300ETF 现货，想做备兑增强')">备兑增收</span>
+  <span class="shortcut" onclick="setShortcut('整体波动率偏高，想收 theta')">IV 偏高卖方</span>
+  <span class="shortcut" onclick="setShortcut('双向波动可能变大，但下行空间更多，下方 8% 有支撑')">非对称波动</span>
+  <span class="shortcut" onclick="setShortcut('偏空，下行空间大，上方 5% 有压力')">偏空压力位</span>
 </div>
 
 <div id="status"></div>
@@ -437,7 +450,7 @@ HTML_PAGE = """<!DOCTYPE html>
         <th>评分</th>
         <th>成本/收入</th>
         <th>Greeks</th>
-        <th>IV分位</th>
+        <th>IV分位(ATM/C/P)</th>
         <th>腿</th>
         <th>盈利条件</th>
         <th>风险</th>
@@ -449,6 +462,15 @@ HTML_PAGE = """<!DOCTYPE html>
 
 <script>
 let coveredCallMode = false;
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 function setShortcut(text) {
   document.getElementById('text').value = text;
@@ -464,38 +486,44 @@ function setCoveredCallMode(enabled) {
   coveredCallMode = !!enabled;
   const panel = document.getElementById('cc-panel');
   const coveredBtn = document.getElementById('btn-covered');
-  if (panel) {
-    panel.classList.toggle('visible', coveredCallMode);
-  }
-  if (coveredBtn) {
-    coveredBtn.textContent = coveredCallMode ? '运行备兑扫描' : '备兑扫描';
-  }
+  if (panel) panel.classList.toggle('visible', coveredCallMode);
+  if (coveredBtn) coveredBtn.textContent = coveredCallMode ? '运行备兑扫描' : '备兑扫描';
 }
 
 function getSelectedUnderlyings() {
   const allChk = document.getElementById('chk-ALL');
   if (allChk.checked) return ['ALL'];
   const checks = document.querySelectorAll('.underlying-panel input[type="checkbox"]:not(#chk-ALL):checked');
-  const vals = Array.from(checks).map(c => c.value);
-  return vals.length ? vals : ['510300'];
+  const values = Array.from(checks).map(c => c.value);
+  return values.length ? values : ['510300'];
 }
 
 function toggleAll(el) {
   const others = document.querySelectorAll('.underlying-panel input[type="checkbox"]:not(#chk-ALL)');
-  others.forEach(c => { c.checked = false; c.disabled = el.checked; });
+  others.forEach(c => {
+    c.checked = false;
+    c.disabled = el.checked;
+  });
 }
 
 function selectAll() {
   document.getElementById('chk-ALL').checked = false;
   const others = document.querySelectorAll('.underlying-panel input[type="checkbox"]:not(#chk-ALL)');
-  others.forEach(c => { c.checked = true; c.disabled = false; });
+  others.forEach(c => {
+    c.checked = true;
+    c.disabled = false;
+  });
 }
 
 function clearAll() {
   document.getElementById('chk-ALL').checked = false;
   const others = document.querySelectorAll('.underlying-panel input[type="checkbox"]:not(#chk-ALL)');
-  others.forEach(c => { c.checked = false; c.disabled = false; });
-  document.querySelector('input[value="510300"]').checked = true;
+  others.forEach(c => {
+    c.checked = false;
+    c.disabled = false;
+  });
+  const defaultBox = document.querySelector('input[value="510300"]');
+  if (defaultBox) defaultBox.checked = true;
 }
 
 function clearResultArea() {
@@ -504,8 +532,10 @@ function clearResultArea() {
   presentationNote.className = 'presentation-note';
   presentationNote.textContent = '';
   document.getElementById('narrative').style.display = 'none';
+  document.getElementById('narrative').textContent = '';
   document.getElementById('result-table').style.display = 'none';
   document.getElementById('intent-bar').style.display = 'none';
+  document.getElementById('intent-bar').innerHTML = '';
   document.getElementById('result-body').innerHTML = '';
 }
 
@@ -518,20 +548,14 @@ async function runAdvisor() {
   const isAll = selectedIds.includes('ALL');
   const underlyingId = isAll ? 'ALL' : selectedIds[0];
 
-  let finalText = text;
-  if (!isAll && selectedIds.length > 1) {
-    const names = selectedIds.join('、');
-    finalText = `[标的：${names}] ${text}`;
-  }
-
   const btn = document.getElementById('btn');
   const status = document.getElementById('status');
   btn.disabled = true;
   status.className = 'loading';
   status.textContent = isAll
-    ? '全量分析中，预计需要60-120秒…'
+    ? '全量分析中，预计需要 30-120 秒…'
     : selectedIds.length > 1
-      ? `分析 ${selectedIds.length} 个标的，预计20-40秒…`
+      ? `分析 ${selectedIds.length} 个标的中，预计需要 20-40 秒…`
       : '分析中…';
 
   clearResultArea();
@@ -541,10 +565,10 @@ async function runAdvisor() {
 
   try {
     const payload = isAll
-      ? { text: finalText, underlying_id: 'ALL' }
+      ? { text, underlying_id: 'ALL' }
       : selectedIds.length > 1
-        ? { text: finalText, underlying_ids: selectedIds }
-        : { text: finalText, underlying_id: underlyingId };
+        ? { text, underlying_ids: selectedIds }
+        : { text, underlying_id: underlyingId };
 
     console.log('[frontend_multi_check] selectedIds=', selectedIds);
     console.log('[frontend_multi_check] payload=', payload);
@@ -556,13 +580,13 @@ async function runAdvisor() {
       signal: controller.signal,
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
     const raw = await resp.json();
     const result = raw.data || raw;
-
     renderResult(result);
     status.className = '';
     status.textContent = '';
-  } catch(e) {
+  } catch (e) {
     status.className = 'error';
     status.textContent = '请求失败：' + e.message;
   } finally {
@@ -597,15 +621,15 @@ async function runCoveredCall() {
   const topN = Number(document.getElementById('cc-top-n').value || 5);
 
   if (!Number.isFinite(hands) || hands <= 0) {
-    alert("手数输入无效");
+    alert('手数输入无效');
     return;
   }
   if (dteMin <= 0 || dteMax < dteMin) {
-    alert("DTE范围输入无效");
+    alert('DTE 范围输入无效');
     return;
   }
   if (shortDteMax < dteMin) {
-    alert("近期限截止DTE不能小于最短DTE");
+    alert('近期限截止 DTE 不能小于最短 DTE');
     return;
   }
 
@@ -623,7 +647,7 @@ async function runCoveredCall() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         underlying_id: underlyingId,
-        hands: hands,
+        hands,
         dte_min: dteMin,
         dte_max: dteMax,
         delta_target: deltaTarget,
@@ -633,15 +657,14 @@ async function runCoveredCall() {
         top_n: topN,
         target_upside_rules: [
           { dte_max: shortDteMax, target_upside_buffer: shortBuffer },
-          { dte_max: 9999, target_upside_buffer: longBuffer }
-        ]
-      })
+          { dte_max: 9999, target_upside_buffer: longBuffer },
+        ],
+      }),
     });
 
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const payload = await resp.json();
     renderCoveredCallResult(payload.data);
-
     status.className = '';
     status.textContent = '';
   } catch (e) {
@@ -652,30 +675,33 @@ async function runCoveredCall() {
   }
 }
 
-function renderResult(data) {
-  const intent = data.parsed_intent || {};
+function renderIntentBar(intent) {
   const intentBar = document.getElementById('intent-bar');
-  intentBar.style.display = 'flex';
-
   const gp = intent.greeks_preference || {};
-  const gpStr = Object.entries(gp).map(([k, v]) =>
-    `${k}:${v.sign === 'positive' ? '↑' : v.sign === 'negative' ? '↓' : '~'}(${v.strength})`
-  ).join(' ');
+  const gpStr = Object.entries(gp).map(([k, v]) => {
+    const sign = v.sign === 'positive' ? '↑' : v.sign === 'negative' ? '↓' : '~';
+    return `${k}:${sign}(${v.strength})`;
+  }).join(' ');
   const pl = intent.price_levels || {};
-  const plStr = Object.entries(pl).map(([k, v]) =>
-    `${k}:${(v * 100).toFixed(1)}%`
-  ).join(' ');
+  const plStr = Object.entries(pl).map(([k, v]) => `${k}:${(v * 100).toFixed(1)}%`).join(' ');
+  const underlyings = intent.underlying_ids || [intent.underlying_id].filter(Boolean);
 
   intentBar.innerHTML = `
     <span>解析：</span>
-    <span class="badge">market: ${intent.market_view || '-'}</span>
-    <span class="badge">vol: ${intent.vol_view || '-'}</span>
-    <span class="badge">标的: ${(intent.underlying_ids || [intent.underlying_id]).join(', ')}</span>
-    <span class="badge">DTE: ${intent.dte_min}-${intent.dte_max}天</span>
-    ${gpStr ? `<span class="badge">Greeks: ${gpStr}</span>` : ''}
-    ${plStr ? `<span class="badge">价位: ${plStr}</span>` : ''}
-    ${intent.asymmetry ? `<span class="badge">偏态: ${intent.asymmetry}</span>` : ''}
+    <span class="badge">market: ${escapeHtml(intent.market_view || '-')}</span>
+    <span class="badge">vol: ${escapeHtml(intent.vol_view || '-')}</span>
+    <span class="badge">标的: ${escapeHtml(underlyings.join(', '))}</span>
+    <span class="badge">DTE: ${escapeHtml(intent.dte_min)}-${escapeHtml(intent.dte_max)}天</span>
+    ${gpStr ? `<span class="badge">Greeks: ${escapeHtml(gpStr)}</span>` : ''}
+    ${plStr ? `<span class="badge">价位: ${escapeHtml(plStr)}</span>` : ''}
+    ${intent.asymmetry ? `<span class="badge">偏态: ${escapeHtml(intent.asymmetry)}</span>` : ''}
   `;
+  intentBar.style.display = 'flex';
+}
+
+function renderResult(data) {
+  const intent = data.parsed_intent || {};
+  renderIntentBar(intent);
 
   const briefing = data.briefing || {};
   const presentation = briefing.presentation || {};
@@ -690,6 +716,7 @@ function renderResult(data) {
     presentationNoteEl.style.display = 'block';
     presentationNoteEl.textContent = presentation.note;
   }
+
   const narrativeEl = document.getElementById('narrative');
   if (briefing.narrative) {
     narrativeEl.style.display = 'block';
@@ -699,32 +726,41 @@ function renderResult(data) {
   const rows = briefing.table || [];
   if (!rows.length) return;
 
+  const formatIvPart = (value, fallback) => {
+    if (typeof value === 'number') return (value * 100).toFixed(0) + '%';
+    if (value !== undefined && value !== null && value !== '') return String(value);
+    if (typeof fallback === 'number') return (fallback * 100).toFixed(0) + '%';
+    if (fallback !== undefined && fallback !== null && fallback !== '') return String(fallback);
+    return '-';
+  };
+
   const tbody = document.getElementById('result-body');
   tbody.innerHTML = rows.map((r, i) => {
-    const scoreClass = r.score >= 0.80 ? 'score-high'
-                     : r.score >= 0.60 ? 'score-mid'
-                     : 'score-low';
-    const scoreLabel = r.score >= 0.80 ? '⭐⭐⭐'
-                     : r.score >= 0.65 ? '⭐⭐'
-                     : r.score >= 0.50 ? '⭐'
-                     : r.score >= 0.35 ? '△' : '✗';
-    const flags = (r.risk_flags || []).map(f => `<span class="flag">${f}</span>`).join('');
+    const scoreClass = r.score >= 0.80 ? 'score-high' : r.score >= 0.60 ? 'score-mid' : 'score-low';
+    const flags = (r.risk_flags || []).map(f => `<span class="flag">${escapeHtml(f)}</span>`).join('');
     const greeks = `<div class="greeks">
-      <span>Δ=${r.net_delta}</span>
-      <span>V=${r.net_vega}</span>
-      <span>θ=${r.net_theta}</span>
+      <span>Δ=${escapeHtml(r.net_delta)}</span>
+      <span>V=${escapeHtml(r.net_vega)}</span>
+      <span>Θ=${escapeHtml(r.net_theta)}</span>
     </div>`;
-    const ivPctNum = typeof r.iv_pct === 'number' ? (r.iv_pct * 100).toFixed(0) + '%' : r.iv_pct;
-    const profit = r.profit_condition ? `<span class="profit-cond">${r.profit_condition}</span>` : '';
-    return `<tr class="${i===0?'rank-1':''}">
-      <td>${r.rank}</td>
-      <td>${r.underlying}</td>
-      <td><b>${r.strategy}</b></td>
-      <td class="${scoreClass}">${r.score}<br><span class="score-label">${r.score_tier_label || scoreLabel}</span></td>
-      <td>${r.cost}</td>
+    const ivTriplet = r.iv_triplet_display || [
+      formatIvPart(r.atm_iv_pct, r.iv_pct),
+      formatIvPart(r.call_iv_pct, null),
+      formatIvPart(r.put_iv_pct, null),
+    ].join(' / ');
+    const profit = r.profit_condition
+      ? `<span class="profit-cond">${escapeHtml(r.profit_condition)}</span>`
+      : '';
+
+    return `<tr class="${i === 0 ? 'rank-1' : ''}">
+      <td>${escapeHtml(r.rank)}</td>
+      <td>${escapeHtml(r.underlying)}</td>
+      <td><b>${escapeHtml(r.strategy)}</b></td>
+      <td class="${scoreClass}">${escapeHtml(r.score)}<br><span class="score-label">${escapeHtml(r.score_tier_label || '')}</span></td>
+      <td>${escapeHtml(r.cost)}</td>
       <td>${greeks}</td>
-      <td><span class="iv-label">${r.iv_label}(${ivPctNum})</span></td>
-      <td class="legs-cell">${(r.legs||'').replace(/ \\/ /g,'<br>')}</td>
+      <td><span class="iv-label">${escapeHtml(ivTriplet)}</span></td>
+      <td class="legs-cell">${escapeHtml(r.legs || '').replace(/ \\/ /g, '<br>')}</td>
       <td>${profit}</td>
       <td>${flags}</td>
     </tr>`;
@@ -735,21 +771,20 @@ function renderResult(data) {
 
 function renderCoveredCallResult(data) {
   const intentBar = document.getElementById('intent-bar');
-  intentBar.style.display = 'flex';
-
   const rulesText = (data.params.target_upside_rules || [])
     .map(r => `DTE≤${r.dte_max}: ${(r.target_upside_buffer * 100).toFixed(1)}%`)
     .join(' / ');
 
   intentBar.innerHTML = `
     <span>备兑扫描：</span>
-    <span class="badge">标的: ${data.underlying_id}</span>
-    <span class="badge">手数: ${data.hands}</span>
-    <span class="badge">份额: ${data.total_shares}</span>
-    <span class="badge">DTE: ${data.params.dte_min}-${data.params.dte_max}</span>
-    <span class="badge">目标Delta: ${data.params.delta_target}</span>
-    <span class="badge">理想上行保护: ${rulesText || '未设置'}</span>
+    <span class="badge">标的: ${escapeHtml(data.underlying_id)}</span>
+    <span class="badge">手数: ${escapeHtml(data.hands)}</span>
+    <span class="badge">份额: ${escapeHtml(data.total_shares)}</span>
+    <span class="badge">DTE: ${escapeHtml(data.params.dte_min)}-${escapeHtml(data.params.dte_max)}</span>
+    <span class="badge">目标Delta: ${escapeHtml(data.params.delta_target)}</span>
+    <span class="badge">上行保护: ${escapeHtml(rulesText || '未设置')}</span>
   `;
+  intentBar.style.display = 'flex';
 
   const narrativeEl = document.getElementById('narrative');
   narrativeEl.style.display = 'block';
@@ -758,39 +793,34 @@ function renderCoveredCallResult(data) {
 
   const rows = data.items || [];
   const tbody = document.getElementById('result-body');
-
   tbody.innerHTML = rows.map((r, i) => {
-    const scoreClass = r.score >= 1.0 ? 'score-high'
-                     : r.score >= 0.75 ? 'score-mid'
-                     : 'score-low';
-
+    const scoreClass = r.score >= 1.0 ? 'score-high' : r.score >= 0.75 ? 'score-mid' : 'score-low';
     const greeks = `<div class="greeks">
-      <span>Δ=${r.delta}</span>
-      <span>IV=${r.iv}</span>
-      <span>DTE=${r.dte}</span>
+      <span>Δ=${escapeHtml(r.delta)}</span>
+      <span>IV=${escapeHtml(r.iv)}</span>
+      <span>DTE=${escapeHtml(r.dte)}</span>
     </div>`;
-
     const cost = `预计收入 ${r.estimated_total_income_mid}`;
     const legs = `卖CALL K=${r.strike}<br>到期=${r.expiry_date}<br>bid=${r.bid} ask=${r.ask} mid=${r.mid}<br>建议挂单=${r.limit_price}`;
     const profit = `<span class="profit-cond">
       年化=${(r.ann_yield * 100).toFixed(1)}%<br>
-      上行缓冲=${r.upside_buffer !== null ? (r.upside_buffer * 100).toFixed(1) + '%' : '—'}<br>
-      该DTE目标保护=${r.target_upside_buffer !== null && r.target_upside_buffer !== undefined ? (r.target_upside_buffer * 100).toFixed(1) + '%' : '—'}<br>
+      上行缓冲=${r.upside_buffer !== null ? (r.upside_buffer * 100).toFixed(1) + '%' : '-'}<br>
+      规则保护=${r.target_upside_buffer !== null && r.target_upside_buffer !== undefined ? (r.target_upside_buffer * 100).toFixed(1) + '%' : '-'}<br>
       保护评分=${r.buffer_score}
     </span>`;
     const flags = `
       <span class="flag">spread=${(r.rel_spread * 100).toFixed(1)}%</span>
-      <span class="flag">收入(挂单)=${r.estimated_total_income_limit}</span>
+      <span class="flag">收入(挂单)=${escapeHtml(r.estimated_total_income_limit)}</span>
     `;
 
-    return `<tr class="${i===0?'rank-1':''}">
+    return `<tr class="${i === 0 ? 'rank-1' : ''}">
       <td>${i + 1}</td>
-      <td>${r.underlying_id}</td>
+      <td>${escapeHtml(r.underlying_id)}</td>
       <td><b>covered_call</b></td>
-      <td class="${scoreClass}">${r.score}</td>
-      <td>${cost}</td>
+      <td class="${scoreClass}">${escapeHtml(r.score)}</td>
+      <td>${escapeHtml(cost)}</td>
       <td>${greeks}</td>
-      <td>—</td>
+      <td>-</td>
       <td class="legs-cell">${legs}</td>
       <td>${profit}</td>
       <td>${flags}</td>

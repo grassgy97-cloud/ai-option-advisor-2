@@ -23,7 +23,14 @@ _DIAGONAL_STRATEGY_TYPES = {
     "diagonal_call",
     "diagonal_put",
 }
+_FAMILY_DIAG_STRATEGY_TYPES = {
+    "naked_call",
+    "naked_put",
+    "iron_condor",
+    "iron_fly",
+}
 _SAME_STRIKE_THRESHOLD = 1e-6
+_IRON_RELAXED_MAX_REL_SPREAD = 0.045
 
 
 def _is_vertical_strategy(strategy_type: str) -> bool:
@@ -37,6 +44,23 @@ def _vertical_trace(strategy_type: str, message: str) -> None:
 
 def _is_diagonal_strategy(strategy_type: str) -> bool:
     return strategy_type in _DIAGONAL_STRATEGY_TYPES
+
+
+def _is_family_diag_strategy(strategy_type: str) -> bool:
+    return strategy_type in _FAMILY_DIAG_STRATEGY_TYPES
+
+
+def _family_diag_trace(strategy: StrategySpec, attempted: bool, resolved: bool, reason: str) -> None:
+    if _is_family_diag_strategy(strategy.strategy_type):
+        print(
+            f"[family_diag] uid={strategy.underlying_id} stage=resolver "
+            f"strategy={strategy.strategy_type} attempted={attempted} resolved={resolved} reason={reason}"
+        )
+
+
+def _iron_trace(strategy_type: str, message: str) -> None:
+    if strategy_type in {"iron_condor", "iron_fly"}:
+        print(f"[iron_resolver] strategy={strategy_type} {message}")
 
 
 @dataclass
@@ -285,6 +309,100 @@ def filter_quotes_for_constraints(
         out.append(q)
 
     return out
+
+
+def _iron_filter_breakdown(
+    quotes: List[Dict[str, Any]],
+    strategy: StrategySpec,
+    max_rel_spread: float | None,
+    min_quote_size: int | None,
+    dte_min: int | None = None,
+    dte_max: int | None = None,
+) -> Dict[str, Any]:
+    after_dte: List[Dict[str, Any]] = []
+    after_price: List[Dict[str, Any]] = []
+    after_quote_size: List[Dict[str, Any]] = []
+    after_spread: List[Dict[str, Any]] = []
+    after_strike_grid: List[Dict[str, Any]] = []
+
+    dte_min = strategy.constraints.dte_min if dte_min is None else dte_min
+    dte_max = strategy.constraints.dte_max if dte_max is None else dte_max
+
+    for q in quotes:
+        dte = q.get("dte")
+        if dte is None:
+            dte = q.get("dte_calendar")
+        if dte is None:
+            continue
+        if dte_min is not None and dte < dte_min:
+            continue
+        if dte_max is not None and dte > dte_max:
+            continue
+        after_dte.append(q)
+
+    for q in after_dte:
+        price = q.get("price")
+        if price is None:
+            price = q.get("option_market_price")
+        if price is None or price <= 0:
+            continue
+        after_price.append(q)
+
+    for q in after_price:
+        bid_vol = q.get("bid_vol1")
+        ask_vol = q.get("ask_vol1")
+        if min_quote_size is not None:
+            if bid_vol is None or ask_vol is None:
+                continue
+            if bid_vol < min_quote_size or ask_vol < min_quote_size:
+                continue
+        after_quote_size.append(q)
+
+    for q in after_quote_size:
+        if max_rel_spread is not None:
+            bid = q.get("bid_price1")
+            ask = q.get("ask_price1")
+            if bid is None or ask is None or bid <= 0 or ask <= 0:
+                continue
+            mid = q.get("mid_price")
+            if mid is None:
+                mid = (bid + ask) / 2
+            if mid is None or mid <= 0:
+                continue
+            rel_spread = (ask - bid) / mid
+            if rel_spread > max_rel_spread:
+                continue
+        after_spread.append(q)
+
+    for q in after_spread:
+        strike = q.get("strike")
+        if strike is not None:
+            strike_rounded = round(float(strike) * 20) / 20
+            if abs(float(strike) - strike_rounded) > 0.001:
+                continue
+        after_strike_grid.append(q)
+
+    failure = "ok"
+    if not after_dte:
+        failure = "dte_filter_empty"
+    elif not after_price:
+        failure = "price_filter_empty"
+    elif not after_quote_size:
+        failure = "quote_size_filter_too_strict"
+    elif not after_spread:
+        failure = "spread_filter_too_strict"
+    elif not after_strike_grid:
+        failure = "strike_grid_filter_empty"
+
+    return {
+        "total": len(quotes),
+        "after_dte": len(after_dte),
+        "after_price_validity": len(after_price),
+        "after_quote_size": len(after_quote_size),
+        "after_spread": len(after_spread),
+        "after_strike_grid": len(after_strike_grid),
+        "failure": failure,
+    }
 
 
 def group_by_expiry(quotes: List[Dict[str, Any]]) -> Dict[date, List[Dict[str, Any]]]:
@@ -745,6 +863,8 @@ def resolve_strategy_from_snapshot(
     snapshot: MarketSnapshot,
     strategy: StrategySpec,
 ) -> Optional[ResolvedStrategy]:
+    if _is_family_diag_strategy(strategy.strategy_type):
+        _family_diag_trace(strategy, attempted=True, resolved=False, reason="attempted")
     if strategy.strategy_type in ("iron_condor", "iron_fly"):
         return _resolve_iron_structure_from_snapshot(snapshot, strategy)
 
@@ -766,6 +886,7 @@ def resolve_strategy_from_snapshot(
 
     if not quotes:
         _vertical_trace(strategy.strategy_type, "return_none_reason=no_quotes")
+        _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_quote_filter_failure")
         return None
 
     resolved_legs: List[ResolvedLeg] = []
@@ -787,6 +908,7 @@ def resolve_strategy_from_snapshot(
 
     if not first_filtered:
         _vertical_trace(strategy.strategy_type, "return_none_reason=first_leg_no_filtered_quotes")
+        _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_quote_filter_failure")
         return None
 
     first_grouped = group_by_expiry(first_filtered)
@@ -794,6 +916,7 @@ def resolve_strategy_from_snapshot(
     logger.debug(f"[resolver] first_expiry = {first_expiry}")
     if first_expiry is None:
         _vertical_trace(strategy.strategy_type, "return_none_reason=first_leg_no_expiry")
+        _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_no_valid_legs")
         return None
     _vertical_trace(strategy.strategy_type, f"selected_expiry={first_expiry}")
 
@@ -829,6 +952,7 @@ def resolve_strategy_from_snapshot(
             f"return_none_reason=first_leg_not_found expiry={first_expiry} "
             f"target_delta={first_leg_spec.delta_target} target_strike_pct={first_leg_spec.strike_pct_target}"
         )
+        _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_no_valid_legs")
         return None
     _vertical_trace(
         strategy.strategy_type,
@@ -897,6 +1021,7 @@ def resolve_strategy_from_snapshot(
                 second_filtered = _filter_quotes_for_leg(quotes, strategy, second_leg_spec, 1)
                 logger.debug(f"[resolver] second leg filtered quotes = {len(second_filtered)}")
                 if not second_filtered:
+                    _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_quote_filter_failure")
                     return None
                 second_grouped = group_by_expiry(second_filtered)
                 second_expiry = choose_expiry(
@@ -907,6 +1032,7 @@ def resolve_strategy_from_snapshot(
 
             logger.debug(f"[resolver] second_expiry = {second_expiry}")
             if second_expiry is None:
+                _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_no_valid_legs")
                 return None
 
             if strategy.strategy_type in ("call_calendar", "put_calendar"):
@@ -928,6 +1054,7 @@ def resolve_strategy_from_snapshot(
         logger.debug(f"[resolver] second_leg_quote found = {second_leg_quote is not None}")
         if second_leg_quote is None:
             _vertical_trace(strategy.strategy_type, "return_none_reason=second_leg_not_found")
+            _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_no_valid_legs")
             return None
         if _is_diagonal_strategy(strategy.strategy_type):
             first_strike = first_leg_quote.get("strike")
@@ -963,6 +1090,7 @@ def resolve_strategy_from_snapshot(
         strategy.strategy_type,
         f"resolved_success legs={len(resolved_legs)} net_credit={net_credit} net_debit={net_debit}"
     )
+    _family_diag_trace(strategy, attempted=True, resolved=True, reason="resolved_success")
 
     return ResolvedStrategy(
         strategy_type=strategy.strategy_type,
@@ -988,30 +1116,144 @@ def _resolve_iron_structure_from_snapshot(
 ) -> Optional[ResolvedStrategy]:
     quotes = snapshot.merged_quotes
     spot = snapshot.spot
+    primary_dte_min = strategy.constraints.dte_min
+    primary_dte_max = strategy.constraints.dte_max
 
     if not quotes:
+        _iron_trace(strategy.strategy_type, "stage=initial total=0 failure=no_quotes")
+        _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_quote_filter_failure")
         return None
+
+    _iron_trace(
+        strategy.strategy_type,
+        f"primary_dte=({primary_dte_min},{primary_dte_max})"
+    )
+
+    primary_breakdown = _iron_filter_breakdown(
+        quotes=quotes,
+        strategy=strategy,
+        max_rel_spread=strategy.constraints.max_rel_spread,
+        min_quote_size=strategy.constraints.min_quote_size,
+        dte_min=primary_dte_min,
+        dte_max=primary_dte_max,
+    )
+    _iron_trace(
+        strategy.strategy_type,
+        "stage=filter_primary "
+        f"total={primary_breakdown['total']} "
+        f"after_dte={primary_breakdown['after_dte']} "
+        f"after_price_validity={primary_breakdown['after_price_validity']} "
+        f"after_quote_size={primary_breakdown['after_quote_size']} "
+        f"after_spread={primary_breakdown['after_spread']} "
+        f"after_strike_grid={primary_breakdown['after_strike_grid']} "
+        f"failure={primary_breakdown['failure']}",
+    )
 
     filtered = filter_quotes_for_constraints(
         quotes=quotes,
-        dte_min=strategy.constraints.dte_min,
-        dte_max=strategy.constraints.dte_max,
+        dte_min=primary_dte_min,
+        dte_max=primary_dte_max,
         max_rel_spread=strategy.constraints.max_rel_spread,
         min_quote_size=strategy.constraints.min_quote_size,
     )
     if not filtered:
-        return None
+        active_dte_min = primary_dte_min
+        active_dte_max = primary_dte_max
+        if primary_breakdown["after_dte"] == 0:
+            fallback_dte_min = max(10, int(primary_dte_min) - 10) if primary_dte_min is not None else 10
+            fallback_dte_max = int(primary_dte_max) + 20 if primary_dte_max is not None else 65
+            fallback_breakdown = _iron_filter_breakdown(
+                quotes=quotes,
+                strategy=strategy,
+                max_rel_spread=strategy.constraints.max_rel_spread,
+                min_quote_size=strategy.constraints.min_quote_size,
+                dte_min=fallback_dte_min,
+                dte_max=fallback_dte_max,
+            )
+            filtered = filter_quotes_for_constraints(
+                quotes=quotes,
+                dte_min=fallback_dte_min,
+                dte_max=fallback_dte_max,
+                max_rel_spread=strategy.constraints.max_rel_spread,
+                min_quote_size=strategy.constraints.min_quote_size,
+            )
+            _iron_trace(
+                strategy.strategy_type,
+                f"fallback_dte=({fallback_dte_min},{fallback_dte_max}) fallback_count={len(filtered)} "
+                f"after_dte={fallback_breakdown['after_dte']} "
+                f"after_price_validity={fallback_breakdown['after_price_validity']} "
+                f"after_quote_size={fallback_breakdown['after_quote_size']} "
+                f"after_spread={fallback_breakdown['after_spread']} "
+                f"after_strike_grid={fallback_breakdown['after_strike_grid']} "
+                f"failure={fallback_breakdown['failure']}"
+            )
+            if filtered:
+                active_dte_min = fallback_dte_min
+                active_dte_max = fallback_dte_max
+
+        relaxed_spread = None
+        if not filtered and strategy.constraints.max_rel_spread is not None:
+            relaxed_spread = min(
+                _IRON_RELAXED_MAX_REL_SPREAD,
+                float(strategy.constraints.max_rel_spread) + 0.015,
+            )
+        if relaxed_spread is not None and relaxed_spread > float(strategy.constraints.max_rel_spread):
+            relaxed_breakdown = _iron_filter_breakdown(
+                quotes=quotes,
+                strategy=strategy,
+                max_rel_spread=relaxed_spread,
+                min_quote_size=strategy.constraints.min_quote_size,
+                dte_min=active_dte_min,
+                dte_max=active_dte_max,
+            )
+            _iron_trace(
+                strategy.strategy_type,
+                "stage=filter_relaxed "
+                f"active_dte=({active_dte_min},{active_dte_max}) "
+                f"relaxed_max_rel_spread={relaxed_spread:.3f} "
+                f"total={relaxed_breakdown['total']} "
+                f"after_dte={relaxed_breakdown['after_dte']} "
+                f"after_price_validity={relaxed_breakdown['after_price_validity']} "
+                f"after_quote_size={relaxed_breakdown['after_quote_size']} "
+                f"after_spread={relaxed_breakdown['after_spread']} "
+                f"after_strike_grid={relaxed_breakdown['after_strike_grid']} "
+                f"failure={relaxed_breakdown['failure']}",
+            )
+            filtered = filter_quotes_for_constraints(
+                quotes=quotes,
+                dte_min=active_dte_min,
+                dte_max=active_dte_max,
+                max_rel_spread=relaxed_spread,
+                min_quote_size=strategy.constraints.min_quote_size,
+            )
+            if filtered:
+                _iron_trace(
+                    strategy.strategy_type,
+                    f"stage=relaxation_applied reason=primary_empty relaxed_max_rel_spread={relaxed_spread:.3f} remaining={len(filtered)}"
+                )
+        if not filtered:
+            _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_quote_filter_failure")
+            _iron_trace(strategy.strategy_type, f"failure={primary_breakdown['failure']}")
+            return None
 
     grouped = group_by_expiry(filtered)
     expiry = choose_expiry(grouped, "nearest")
     if expiry is None:
+        _iron_trace(strategy.strategy_type, "failure=same_expiry_requirement_no_expiry")
+        _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_no_valid_legs")
         return None
 
     same_expiry = [q for q in filtered if q["expiry_date"] == expiry]
     calls = [q for q in same_expiry if q["option_type"] == "CALL"]
     puts = [q for q in same_expiry if q["option_type"] == "PUT"]
+    _iron_trace(
+        strategy.strategy_type,
+        f"stage=expiry expiry={expiry} same_expiry_count={len(same_expiry)} calls={len(calls)} puts={len(puts)}"
+    )
 
     if not calls or not puts:
+        _iron_trace(strategy.strategy_type, "failure=same_expiry_requirement_missing_call_or_put")
+        _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_no_valid_legs")
         return None
 
     if strategy.strategy_type == "iron_condor":
@@ -1033,7 +1275,22 @@ def _resolve_iron_structure_from_snapshot(
             [q for q in puts if q["strike"] < put_sell["strike"]], 0.20
         ) if put_sell else None
 
+    call_buy_pool = [q for q in calls if call_sell and q["strike"] > call_sell["strike"]]
+    put_buy_pool = [q for q in puts if put_sell and q["strike"] < put_sell["strike"]]
+    _iron_trace(
+        strategy.strategy_type,
+        "stage=leg_selection "
+        f"call_sell_found={call_sell is not None} "
+        f"put_sell_found={put_sell is not None} "
+        f"call_buy_pool={len(call_buy_pool)} "
+        f"put_buy_pool={len(put_buy_pool)} "
+        f"call_buy_found={call_buy is not None} "
+        f"put_buy_found={put_buy is not None}"
+    )
+
     if not all([call_sell, call_buy, put_sell, put_buy]):
+        _iron_trace(strategy.strategy_type, "failure=strike_ordering_or_wing_width")
+        _family_diag_trace(strategy, attempted=True, resolved=False, reason="resolver_no_valid_legs")
         return None
 
     legs = [
@@ -1044,6 +1301,11 @@ def _resolve_iron_structure_from_snapshot(
     ]
 
     net_premium, net_credit, net_debit = calc_net_premium(legs)
+    _iron_trace(
+        strategy.strategy_type,
+        f"stage=resolved_success net_credit={net_credit} net_debit={net_debit}"
+    )
+    _family_diag_trace(strategy, attempted=True, resolved=True, reason="resolved_success")
 
     return ResolvedStrategy(
         strategy_type=strategy.strategy_type,
