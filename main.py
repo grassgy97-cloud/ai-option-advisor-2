@@ -227,6 +227,24 @@ HTML_PAGE = """<!DOCTYPE html>
     white-space: pre-wrap;
     display: none;
   }
+  .presentation-note {
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    line-height: 1.6;
+    display: none;
+  }
+  .presentation-note.reference {
+    background: #1f2230;
+    border: 1px solid #4a556f;
+    color: #d6d9e5;
+  }
+  .presentation-note.weak {
+    background: #2a1b1b;
+    border: 1px solid #6b2c2c;
+    color: #f5c2c2;
+  }
 
   .table-wrap {
     overflow-x: auto;
@@ -403,6 +421,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
 <div id="status"></div>
 <div id="intent-bar"></div>
+<div id="presentation-note" class="presentation-note"></div>
 <div id="narrative"></div>
 
 <div class="table-wrap">
@@ -457,6 +476,10 @@ function clearAll() {
 }
 
 function clearResultArea() {
+  const presentationNote = document.getElementById('presentation-note');
+  presentationNote.style.display = 'none';
+  presentationNote.className = 'presentation-note';
+  presentationNote.textContent = '';
   document.getElementById('narrative').style.display = 'none';
   document.getElementById('result-table').style.display = 'none';
   document.getElementById('intent-bar').style.display = 'none';
@@ -510,6 +533,7 @@ async function runAdvisor() {
     let allRows = [];
     let narrative = '';
     let intentData = null;
+    let presentation = null;
 
     for (const d of results) {
       if (!intentData) intentData = d.parsed_intent;
@@ -518,6 +542,9 @@ async function runAdvisor() {
       if (!narrative && (d.briefing || {}).narrative) {
         narrative = d.briefing.narrative;
       }
+      if (!presentation && (d.briefing || {}).presentation) {
+        presentation = d.briefing.presentation;
+      }
     }
 
     if (idsToRun.length > 1) {
@@ -525,7 +552,7 @@ async function runAdvisor() {
       allRows = allRows.slice(0, 10).map((r, i) => ({ ...r, rank: i + 1 }));
     }
 
-    renderResult({ parsed_intent: intentData, briefing: { table: allRows, narrative } });
+    renderResult({ parsed_intent: intentData, briefing: { table: allRows, narrative, presentation } });
     status.className = '';
     status.textContent = '';
   } catch(e) {
@@ -634,6 +661,18 @@ function renderResult(data) {
   `;
 
   const briefing = data.briefing || {};
+  const presentation = briefing.presentation || {};
+  const presentationNoteEl = document.getElementById('presentation-note');
+  if (presentation.note) {
+    const tierClass = presentation.overall_tier === 'weak_match_watchlist'
+      ? 'weak'
+      : presentation.overall_tier === 'reference_candidate'
+        ? 'reference'
+        : '';
+    presentationNoteEl.className = `presentation-note ${tierClass}`.trim();
+    presentationNoteEl.style.display = 'block';
+    presentationNoteEl.textContent = presentation.note;
+  }
   const narrativeEl = document.getElementById('narrative');
   if (briefing.narrative) {
     narrativeEl.style.display = 'block';
@@ -646,7 +685,7 @@ function renderResult(data) {
   const tbody = document.getElementById('result-body');
   tbody.innerHTML = rows.map((r, i) => {
     const scoreClass = r.score >= 0.80 ? 'score-high'
-                     : r.score >= 0.65 ? 'score-mid'
+                     : r.score >= 0.60 ? 'score-mid'
                      : 'score-low';
     const scoreLabel = r.score >= 0.80 ? '⭐⭐⭐'
                      : r.score >= 0.65 ? '⭐⭐'
@@ -664,7 +703,7 @@ function renderResult(data) {
       <td>${r.rank}</td>
       <td>${r.underlying}</td>
       <td><b>${r.strategy}</b></td>
-      <td class="${scoreClass}">${r.score}<br><span class="score-label">${scoreLabel}</span></td>
+      <td class="${scoreClass}">${r.score}<br><span class="score-label">${r.score_tier_label || scoreLabel}</span></td>
       <td>${r.cost}</td>
       <td>${greeks}</td>
       <td><span class="iv-label">${r.iv_label}(${ivPctNum})</span></td>

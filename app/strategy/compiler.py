@@ -61,6 +61,12 @@ _FAMILY_STRATEGY_TYPES: Dict[StrategyFamily, set[str]] = {
     "long_single": {"long_call", "long_put"},
     "covered_call": {"covered_call"},
 }
+_VERTICAL_STRATEGY_TYPES = (
+    "bull_call_spread",
+    "bear_call_spread",
+    "bull_put_spread",
+    "bear_put_spread",
+)
 
 _OPPORTUNITY_FAMILY_WEIGHTS: Dict[OpportunityType, Dict[StrategyFamily, float]] = {
     "directional_defined_risk": {"vertical": 1.0},
@@ -74,10 +80,23 @@ _OPPORTUNITY_FAMILY_WEIGHTS: Dict[OpportunityType, Dict[StrategyFamily, float]] 
 _CALENDAR_TERM_THRESHOLD = 0.45
 _CALENDAR_SURFACE_THRESHOLD = 0.60
 _DIAGONAL_DIRECTION_THRESHOLD = 0.40
+_USER_SOFT_PRIORITY_WEIGHT = 1.00
+_INFERRED_SOFT_PRIORITY_WEIGHT = 0.60
+_MACHINE_SOFT_PRIORITY_WEIGHT = 0.35
+_CALENDAR_DIAGONAL_GATE_PENALTY = 0.08
+_GATE_FAILED_FAMILY_MIN_SCORE = 0.50
 
 
 def _clip01(v: float) -> float:
     return max(0.0, min(1.0, v))
+
+
+def _vertical_presence(keys: List[str] | set[str] | tuple[str, ...]) -> Dict[str, bool]:
+    key_set = set(keys)
+    return {
+        strategy_type: strategy_type in key_set
+        for strategy_type in _VERTICAL_STRATEGY_TYPES
+    }
 
 
 def _json_safe_value(value: Any) -> Any:
@@ -447,6 +466,296 @@ def _family_soft_signal_summary(
     }
 
 
+def _family_soft_priority_adjustment(
+    bundle: FamilyConstraintBundle,
+    family: StrategyFamily,
+) -> tuple[Dict[str, float], float]:
+    soft_signals = _family_soft_signal_summary(bundle, family)
+    adjustment = (
+        soft_signals["user_soft"] * _USER_SOFT_PRIORITY_WEIGHT
+        + soft_signals["inferred_soft"] * _INFERRED_SOFT_PRIORITY_WEIGHT
+        + soft_signals["machine_soft"] * _MACHINE_SOFT_PRIORITY_WEIGHT
+    )
+    return soft_signals, round(adjustment, 4)
+
+
+def _family_best_strategy_weight(
+    best_map: Dict[str, float],
+    family: StrategyFamily,
+) -> float:
+    weights = [
+        float(weight)
+        for strategy_type, weight in best_map.items()
+        if _strategy_family_for_type(strategy_type) == family
+    ]
+    return max(weights) if weights else 0.0
+
+
+def _has_explicit_hard_family_constraints(bundle: FamilyConstraintBundle) -> bool:
+    return bool(bundle.user_hard.allowed_families or bundle.user_hard.banned_families)
+
+
+def _hard_family_exclusion_reason(
+    family: StrategyFamily,
+    constraints: FamilyConstraintBundle,
+) -> Optional[str]:
+    if constraints.user_hard.allowed_families and family not in constraints.user_hard.allowed_families:
+        return "outside explicit allowed_families"
+    if family in constraints.user_hard.banned_families:
+        return "explicitly banned family"
+    if constraints.user_hard.require_defined_risk and family == "naked_short":
+        return "require_defined_risk removes naked_short"
+    return None
+
+
+def _directional_family_balance_adjustment(
+    intent: IntentSpec,
+    family: StrategyFamily,
+    iv_pct: Optional[float] = None,
+) -> tuple[float, Optional[str]]:
+    evidence = _build_opportunity_evidence_summary(intent, iv_pct=iv_pct)
+    directional = (
+        intent.market_view in ("bullish", "bearish")
+        or intent.asymmetry in ("upside", "downside")
+    )
+    if not directional:
+        return 0.0, None
+
+    gamma_pref = intent.greeks_preference.get("gamma", {})
+    gamma_positive_strength = 0.0
+    if isinstance(gamma_pref, dict) and gamma_pref.get("sign") == "positive":
+        gamma_positive_strength = float(gamma_pref.get("strength", 0.0) or 0.0)
+
+    convexity_evidence = max(
+        float(evidence.get("low_iv_convexity_strength") or 0.0),
+        gamma_positive_strength,
+    )
+    conservative_directional = (
+        intent.defined_risk_only
+        or intent.risk_preference == "low"
+        or intent.allowed_strategies is None
+    )
+
+    if family == "vertical" and conservative_directional and convexity_evidence < 0.45:
+        return 0.08, "directional controlled-risk preservation"
+
+    if family == "long_single":
+        if convexity_evidence >= 0.55:
+            return 0.05, "real convexity evidence"
+        if convexity_evidence < 0.35 and conservative_directional:
+            return -0.08, "ordinary directional case without convexity evidence"
+
+    return 0.0, None
+
+
+def _has_real_convexity_evidence(
+    intent: IntentSpec,
+    iv_pct: Optional[float] = None,
+) -> bool:
+    evidence = _build_opportunity_evidence_summary(intent, iv_pct=iv_pct)
+    gamma_pref = intent.greeks_preference.get("gamma", {})
+    gamma_positive_strength = 0.0
+    if isinstance(gamma_pref, dict) and gamma_pref.get("sign") == "positive":
+        gamma_positive_strength = float(gamma_pref.get("strength", 0.0) or 0.0)
+
+    return (
+        float(evidence.get("low_iv_convexity_strength") or 0.0) >= 0.45
+        or gamma_positive_strength >= 0.55
+    )
+
+
+def _ensure_family_candidates_from_best_map(
+    family_candidates: List[FamilyCandidate],
+    best_map: Dict[str, float],
+) -> Dict[StrategyFamily, FamilyCandidate]:
+    candidate_map: Dict[StrategyFamily, FamilyCandidate] = {c.family: c for c in family_candidates}
+
+    for family in {_strategy_family_for_type(strategy_type) for strategy_type in best_map}:
+        family_weight = _family_best_strategy_weight(best_map, family)
+        existing = candidate_map.get(family)
+        if existing is None:
+            candidate_map[family] = FamilyCandidate(
+                family=family,
+                underlying_id="",
+                opportunity_type=_default_opportunity_for_family(family),
+                score=round(family_weight, 4),
+                confidence=round(min(1.0, family_weight), 4),
+                metadata={"metadata_mode": "best_map_fallback"},
+            )
+        elif family_weight > existing.score:
+            existing.score = round(family_weight, 4)
+            existing.confidence = round(max(existing.confidence, min(1.0, family_weight)), 4)
+            existing.metadata["best_map_weight"] = round(family_weight, 4)
+
+    return candidate_map
+
+
+def _backfill_vertical_strategy_types(
+    best_map: Dict[str, float],
+    family_candidate_map: Dict[StrategyFamily, FamilyCandidate],
+    intent: IntentSpec,
+) -> Dict[str, float]:
+    vertical_candidate = family_candidate_map.get("vertical")
+    if vertical_candidate is None or not vertical_candidate.shortlisted:
+        print(
+            "[vertical_trace] "
+            f"uid={intent.underlying_id} "
+            "backfill_triggered=False "
+            "reason=vertical_family_not_shortlisted"
+        )
+        return best_map
+
+    existing_verticals = [
+        strategy_type
+        for strategy_type in best_map
+        if _strategy_family_for_type(strategy_type) == "vertical"
+    ]
+    if existing_verticals:
+        print(
+            "[vertical_trace] "
+            f"uid={intent.underlying_id} "
+            "backfill_triggered=False "
+            f"reason=vertical_already_present existing={existing_verticals}"
+        )
+        return best_map
+
+    family_score = float(vertical_candidate.score or 0.0)
+    base = min(0.85, max(0.68, round(family_score, 3)))
+    inserted: List[str] = []
+
+    if intent.market_view == "bullish" or intent.asymmetry == "upside":
+        best_map["bull_call_spread"] = max(best_map.get("bull_call_spread", 0.0), base)
+        best_map["bull_put_spread"] = max(best_map.get("bull_put_spread", 0.0), round(max(0.65, base - 0.04), 3))
+        inserted.extend(["bull_call_spread", "bull_put_spread"])
+    elif intent.market_view == "bearish" or intent.asymmetry == "downside":
+        best_map["bear_call_spread"] = max(best_map.get("bear_call_spread", 0.0), base)
+        best_map["bear_put_spread"] = max(best_map.get("bear_put_spread", 0.0), round(max(0.65, base - 0.04), 3))
+        inserted.extend(["bear_call_spread", "bear_put_spread"])
+    else:
+        best_map["bear_call_spread"] = max(best_map.get("bear_call_spread", 0.0), round(max(0.65, base - 0.02), 3))
+        best_map["bull_put_spread"] = max(best_map.get("bull_put_spread", 0.0), round(max(0.65, base - 0.02), 3))
+        inserted.extend(["bear_call_spread", "bull_put_spread"])
+
+    print(
+        "[vertical_trace] "
+        f"uid={intent.underlying_id} "
+        "backfill_triggered=True "
+        f"inserted={inserted}"
+    )
+
+    return best_map
+
+
+def _select_family_shortlist(
+    best_map: Dict[str, float],
+    family_candidates: List[FamilyCandidate],
+    constraints: FamilyConstraintBundle,
+    intent: IntentSpec,
+    iv_pct: Optional[float] = None,
+) -> Dict[StrategyFamily, FamilyCandidate]:
+    candidate_map = _ensure_family_candidates_from_best_map(family_candidates, best_map)
+    active_families = {
+        _strategy_family_for_type(strategy_type)
+        for strategy_type in best_map
+    }
+    explicit_hard = _has_explicit_hard_family_constraints(constraints)
+
+    eligible: List[FamilyCandidate] = []
+    for family in active_families:
+        candidate = candidate_map[family]
+        shortlist_reasons: List[str] = []
+        hard_reason = _hard_family_exclusion_reason(family, constraints)
+        if hard_reason is not None:
+            candidate.shortlisted = False
+            candidate.shortlist_reasons = [hard_reason]
+            candidate.hard_constraints_applied = list({
+                *candidate.hard_constraints_applied,
+                hard_reason,
+            })
+            continue
+
+        candidate.shortlisted = True
+        soft_signals, weighted_adjustment = _family_soft_priority_adjustment(constraints, family)
+        candidate.soft_signals = soft_signals
+        candidate.score = round(max(candidate.score, _family_best_strategy_weight(best_map, family)) + weighted_adjustment, 4)
+        candidate.confidence = round(max(candidate.confidence, min(1.0, candidate.score)), 4)
+
+        directional_balance_adjustment, directional_balance_reason = _directional_family_balance_adjustment(
+            intent,
+            family,
+            iv_pct=iv_pct,
+        )
+        if directional_balance_adjustment != 0.0:
+            candidate.score = round(max(0.0, candidate.score + directional_balance_adjustment), 4)
+            shortlist_reasons.append(
+                f"{directional_balance_reason} ({directional_balance_adjustment:+.2f})"
+            )
+
+        if family in ("calendar", "diagonal") and not candidate.gating_passed:
+            candidate.score = round(max(0.0, candidate.score - _CALENDAR_DIAGONAL_GATE_PENALTY), 4)
+            shortlist_reasons.append("calendar/diagonal gate soft penalty")
+
+        if weighted_adjustment > 0:
+            shortlist_reasons.append(f"soft priority +{weighted_adjustment:.3f}")
+        candidate.shortlist_reasons = shortlist_reasons
+        eligible.append(candidate)
+
+    if not eligible:
+        if explicit_hard:
+            return candidate_map
+
+        fallback_order: List[StrategyFamily] = [
+            "vertical",
+            "iron",
+            "long_single",
+            "covered_call",
+            "calendar",
+            "diagonal",
+            "naked_short",
+        ]
+        for family in fallback_order:
+            if family in active_families and _hard_family_exclusion_reason(family, constraints) is None:
+                candidate_map[family].shortlisted = True
+                candidate_map[family].shortlist_reasons = ["conservative fallback family"]
+                return candidate_map
+        return candidate_map
+
+    if explicit_hard:
+        return candidate_map
+
+    directional_case = (
+        intent.market_view in ("bullish", "bearish")
+        or intent.asymmetry in ("upside", "downside")
+    )
+    if directional_case and "vertical" in active_families and "long_single" in active_families:
+        vertical_candidate = candidate_map.get("vertical")
+        long_single_candidate = candidate_map.get("long_single")
+        if (
+            vertical_candidate is not None
+            and long_single_candidate is not None
+            and vertical_candidate.shortlisted
+            and long_single_candidate.shortlisted
+            and not _has_real_convexity_evidence(intent, iv_pct=iv_pct)
+        ):
+            long_single_candidate.shortlisted = False
+            long_single_candidate.shortlist_reasons = [
+                "ordinary directional case without real convexity evidence"
+            ]
+            eligible = [c for c in eligible if c.family != "long_single"]
+
+    for candidate in eligible:
+        if not candidate.gating_passed and candidate.score < _GATE_FAILED_FAMILY_MIN_SCORE:
+            candidate.shortlisted = False
+            candidate.shortlist_reasons = [
+                f"gate failed and family score below {_GATE_FAILED_FAMILY_MIN_SCORE:.2f}"
+            ]
+            continue
+        if not candidate.shortlist_reasons:
+            candidate.shortlist_reasons = ["compatible family retained"]
+
+    return candidate_map
+
+
 def derive_family_candidates(
     opportunities: List[OpportunityCandidate],
     constraints: FamilyConstraintBundle,
@@ -459,8 +768,7 @@ def derive_family_candidates(
     for opp in opportunities:
         family_weights = _OPPORTUNITY_FAMILY_WEIGHTS.get(opp.opportunity_type, {})
         for family, multiplier in family_weights.items():
-            soft_signals = _family_soft_signal_summary(constraints, family)
-            soft_total = sum(soft_signals.values())
+            soft_signals, soft_total = _family_soft_priority_adjustment(constraints, family)
             base_score = opp.score * multiplier
             score = round(base_score + soft_total, 4)
 
@@ -487,8 +795,10 @@ def derive_family_candidates(
                 opportunity_type=opp.opportunity_type,
                 score=score,
                 confidence=round(max(opp.confidence, min(1.0, base_score)), 4),
+                shortlisted=True,
                 gating_passed=gating_passed,
                 gating_reasons=gating_reasons,
+                shortlist_reasons=[],
                 hard_constraints_applied=hard_constraints_applied,
                 soft_signals=soft_signals,
                 rationale=opp.rationale,
@@ -1091,6 +1401,15 @@ def compile_intent_to_strategies(
         ]
 
     # ===== best_map：各策略取最高prior =====
+    seeded_types = [strategy_type for strategy_type, _ in candidates]
+    print(
+        "[vertical_trace] "
+        f"uid={intent.underlying_id} "
+        "stage=seeded_candidates "
+        f"types={seeded_types} "
+        f"vertical_presence={_vertical_presence(seeded_types)}"
+    )
+
     best_map: dict[str, float] = {}
     for s, w in candidates:
         if s not in best_map or w > best_map[s]:
@@ -1217,10 +1536,81 @@ def compile_intent_to_strategies(
         for k in ("naked_call", "naked_put"):
             best_map.pop(k, None)
 
+    print(
+        "[vertical_trace] "
+        f"uid={intent.underlying_id} "
+        "stage=best_map_before_family_filter "
+        f"keys={list(best_map.keys())} "
+        f"vertical_presence={_vertical_presence(best_map.keys())}"
+    )
+
     # ===== 构建 StrategySpec 列表 =====
+    family_candidate_map = _select_family_shortlist(
+        best_map=best_map,
+        family_candidates=family_candidates,
+        constraints=family_constraints,
+        intent=intent,
+        iv_pct=iv_pct,
+    )
+    vertical_family_candidate = family_candidate_map.get("vertical")
+    print(
+        "[vertical_trace] "
+        f"uid={intent.underlying_id} "
+        "stage=family_shortlist "
+        f"vertical_shortlisted={vertical_family_candidate.shortlisted if vertical_family_candidate is not None else False} "
+        f"reasons={(vertical_family_candidate.shortlist_reasons if vertical_family_candidate is not None else ['vertical_family_missing'])}"
+    )
+    shortlisted_families = {
+        family
+        for family in {_strategy_family_for_type(strategy_type) for strategy_type in best_map}
+        if family_candidate_map.get(family) is not None and family_candidate_map[family].shortlisted
+    }
+    if shortlisted_families:
+        best_map = {
+            strategy_type: weight
+            for strategy_type, weight in best_map.items()
+            if _strategy_family_for_type(strategy_type) in shortlisted_families
+        }
+
+    best_map = _backfill_vertical_strategy_types(
+        best_map=best_map,
+        family_candidate_map=family_candidate_map,
+        intent=intent,
+    )
+    print(
+        "[vertical_trace] "
+        f"uid={intent.underlying_id} "
+        "stage=post_backfill_best_map "
+        f"keys={list(best_map.keys())} "
+        f"vertical_presence={_vertical_presence(best_map.keys())}"
+    )
+    shortlisted_families = {
+        family
+        for family in {_strategy_family_for_type(strategy_type) for strategy_type in best_map}
+        if family_candidate_map.get(family) is not None and family_candidate_map[family].shortlisted
+    }
+
+    for vertical_type in _VERTICAL_STRATEGY_TYPES:
+        if vertical_type not in best_map:
+            print(
+                "[vertical_trace] "
+                f"uid={intent.underlying_id} "
+                "stage=build_strategy_spec "
+                f"strategy_type={vertical_type} "
+                "result=not_attempted"
+            )
+
     specs: List[StrategySpec] = []
     for strategy_type, weight in best_map.items():
         spec = build_strategy_spec(strategy_type, intent)
+        if strategy_type in _VERTICAL_STRATEGY_TYPES:
+            print(
+                "[vertical_trace] "
+                f"uid={intent.underlying_id} "
+                "stage=build_strategy_spec "
+                f"strategy_type={strategy_type} "
+                f"result={'valid_spec' if spec is not None else 'none'}"
+            )
         if spec is None:
             continue
 
@@ -1260,11 +1650,32 @@ def compile_intent_to_strategies(
         ))
         spec.metadata["family_constraints"] = family_constraints_meta
         spec.metadata["family_gate_results"] = family_gate_results
+        spec.metadata["family_shortlist"] = {
+            "shortlisted_families": sorted(shortlisted_families),
+            "active": bool(shortlisted_families),
+        }
         if family_candidate is not None:
             spec.metadata["family_soft_signals"] = _json_safe_value(dict(family_candidate.soft_signals))
             spec.metadata["family_hard_constraints_applied"] = _json_safe_value(list(family_candidate.hard_constraints_applied))
             spec.metadata["family_gate_passed"] = family_candidate.gating_passed
             spec.metadata["family_gate_reasons"] = _json_safe_value(list(family_candidate.gating_reasons))
+            spec.metadata["family_shortlisted"] = family_candidate.shortlisted
+            spec.metadata["family_shortlist_reasons"] = _json_safe_value(list(family_candidate.shortlist_reasons))
         specs.append(spec)
+
+    print(
+        "[compiler] "
+        f"uid={intent.underlying_id} "
+        f"best_map={len(best_map)} "
+        f"specs={len(specs)}"
+    )
+    final_types = [spec.strategy_type for spec in specs]
+    print(
+        "[vertical_trace] "
+        f"uid={intent.underlying_id} "
+        "stage=final_specs "
+        f"types={final_types} "
+        f"vertical_presence={_vertical_presence(final_types)}"
+    )
 
     return specs

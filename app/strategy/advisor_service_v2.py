@@ -452,6 +452,7 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
         target_ids = [underlying_id]
 
     all_resolved: List[ResolvedStrategy] = []
+    compile_resolve_summary: List[Dict[str, Any]] = []
 
     for uid in target_ids:
         t0_uid = time.perf_counter()
@@ -462,12 +463,18 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
         t0 = time.perf_counter()
         candidate_specs = compile_intent_to_strategies(uid_intent, iv_pct=iv_pct)
         print(f"[timing] {uid} compile_intent_to_strategies = {time.perf_counter() - t0:.3f}s, specs={len(candidate_specs)}")
+        summary_item: Dict[str, Any] = {
+            "underlying_id": uid,
+            "compiled_specs": len(candidate_specs),
+            "resolved": 0,
+        }
 
         t0 = time.perf_counter()
         try:
             snapshot = load_market_snapshot(engine, uid)
         except Exception as e:
             print(f"[run_advisor] load snapshot failed for {uid}: {e}")
+            compile_resolve_summary.append(summary_item)
             continue
         print(f"[timing] {uid} load_market_snapshot = {time.perf_counter() - t0:.3f}s, quotes={len(snapshot.merged_quotes)}")
 
@@ -484,8 +491,17 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
             except Exception as e:
                 print(f"[run_advisor] {uid} {spec.strategy_type} failed: {e}")
         print(f"[timing] {uid} resolve all specs = {time.perf_counter() - t0:.3f}s, resolved={resolved_count}")
+        summary_item["resolved"] = resolved_count
+        compile_resolve_summary.append(summary_item)
 
         print(f"[timing] {uid} total = {time.perf_counter() - t0_uid:.3f}s")
+
+    if compile_resolve_summary:
+        summary_text = " | ".join(
+            f"{item['underlying_id']}: specs={item['compiled_specs']}, resolved={item['resolved']}"
+            for item in compile_resolve_summary
+        )
+        print(f"[advisor_summary] {summary_text}")
 
     t0 = time.perf_counter()
     ranked = rank_strategies(all_resolved)

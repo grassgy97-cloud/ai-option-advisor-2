@@ -75,8 +75,10 @@ class FamilyCandidate(BaseModel):
     opportunity_type: OpportunityType
     score: float = 0.0
     confidence: float = 0.0
+    shortlisted: bool = True
     gating_passed: bool = True
     gating_reasons: List[str] = Field(default_factory=list)
+    shortlist_reasons: List[str] = Field(default_factory=list)
     hard_constraints_applied: List[str] = Field(default_factory=list)
     soft_signals: Dict[str, float] = Field(default_factory=dict)
     rationale: Optional[str] = None

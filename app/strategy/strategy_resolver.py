@@ -13,6 +13,22 @@ from app.models.schemas import ResolvedLeg, ResolvedStrategy, StrategyLegSpec, S
 
 logger = logging.getLogger(__name__)
 
+_VERTICAL_STRATEGY_TYPES = {
+    "bull_call_spread",
+    "bear_call_spread",
+    "bull_put_spread",
+    "bear_put_spread",
+}
+
+
+def _is_vertical_strategy(strategy_type: str) -> bool:
+    return strategy_type in _VERTICAL_STRATEGY_TYPES
+
+
+def _vertical_trace(strategy_type: str, message: str) -> None:
+    if _is_vertical_strategy(strategy_type):
+        print(f"[vertical_resolver] strategy_type={strategy_type} {message}")
+
 
 @dataclass
 class MarketSnapshot:
@@ -352,6 +368,7 @@ def choose_vertical_buy_leg(
         if q["option_type"] == option_type and q["expiry_date"] == expiry
     ]
     if not same_expiry:
+        _vertical_trace(strategy_type, f"second_leg_reason=no_same_expiry_quotes expiry={expiry}")
         return None
 
     if strategy_type == "bear_call_spread":
@@ -363,15 +380,32 @@ def choose_vertical_buy_leg(
     elif strategy_type == "bear_put_spread":
         candidates = [q for q in same_expiry if q["strike"] < first_strike]
     else:
+        _vertical_trace(strategy_type, "second_leg_reason=unsupported_vertical_strategy")
         return None
 
     if not candidates:
+        _vertical_trace(
+            strategy_type,
+            f"second_leg_reason=no_directional_candidates expiry={expiry} first_strike={first_strike} "
+            f"same_expiry_count={len(same_expiry)}"
+        )
         return None
 
     picked = choose_by_delta_target(candidates, delta_target)
     if picked is not None:
+        _vertical_trace(
+            strategy_type,
+            f"second_leg_pick=delta_target_match expiry={expiry} target_delta={delta_target} "
+            f"picked_strike={picked.get('strike')} picked_delta={picked.get('delta')}"
+        )
         return picked
-    return min(candidates, key=lambda q: abs(q["strike"] - first_strike))
+    fallback = min(candidates, key=lambda q: abs(q["strike"] - first_strike))
+    _vertical_trace(
+        strategy_type,
+        f"second_leg_pick=strike_fallback expiry={expiry} target_delta={delta_target} "
+        f"picked_strike={fallback.get('strike')} picked_delta={fallback.get('delta')}"
+    )
+    return fallback
 
 
 def choose_atm_like_leg(
@@ -570,8 +604,96 @@ def _filter_quotes_for_leg(
     leg: StrategyLegSpec,
     leg_index: int,
 ) -> List[Dict[str, Any]]:
+    if _is_vertical_strategy(strategy.strategy_type) and leg_index == 0:
+        dte_min, dte_max = _get_leg_dte_bounds(strategy, leg, leg_index)
+
+        total_quotes = list(quotes)
+        after_option_type = [
+            q for q in total_quotes
+            if not leg.option_type or q.get("option_type") == leg.option_type
+        ]
+
+        after_dte = []
+        for q in after_option_type:
+            dte = q.get("dte")
+            if dte is None:
+                dte = q.get("dte_calendar")
+            if dte is None:
+                continue
+            if dte_min is not None and dte < dte_min:
+                continue
+            if dte_max is not None and dte > dte_max:
+                continue
+            after_dte.append(q)
+
+        after_price = []
+        for q in after_dte:
+            price = q.get("price")
+            if price is None:
+                price = q.get("option_market_price")
+            if price is None or price <= 0:
+                continue
+            after_price.append(q)
+
+        after_quote_size = []
+        for q in after_price:
+            if strategy.constraints.min_quote_size is not None:
+                bid_vol = q.get("bid_vol1")
+                ask_vol = q.get("ask_vol1")
+                if bid_vol is None or ask_vol is None:
+                    continue
+                if bid_vol < strategy.constraints.min_quote_size or ask_vol < strategy.constraints.min_quote_size:
+                    continue
+            after_quote_size.append(q)
+
+        after_spread = []
+        for q in after_quote_size:
+            if strategy.constraints.max_rel_spread is not None:
+                bid = q.get("bid_price1")
+                ask = q.get("ask_price1")
+                if bid is None or ask is None or bid <= 0 or ask <= 0:
+                    continue
+                mid = q.get("mid_price")
+                if mid is None:
+                    mid = (bid + ask) / 2
+                if mid <= 0:
+                    continue
+                rel_spread = (ask - bid) / mid
+                if rel_spread > strategy.constraints.max_rel_spread:
+                    continue
+            after_spread.append(q)
+
+        after_strike_grid = []
+        for q in after_spread:
+            strike = q.get("strike")
+            if strike is not None:
+                strike_rounded = round(float(strike) * 20) / 20
+                if abs(float(strike) - strike_rounded) > 0.001:
+                    continue
+            after_strike_grid.append(q)
+
+        delta_compatible = after_strike_grid
+        if leg.delta_target is not None:
+            delta_compatible = [q for q in after_strike_grid if q.get("delta") is not None]
+
+        _vertical_trace(
+            strategy.strategy_type,
+            "first_leg_filter_breakdown "
+            f"total={len(total_quotes)} "
+            f"after_option_type={len(after_option_type)} "
+            f"after_dte={len(after_dte)} "
+            f"after_price_validity={len(after_price)} "
+            f"after_quote_size={len(after_quote_size)} "
+            f"after_spread={len(after_spread)} "
+            f"after_strike_grid={len(after_strike_grid)} "
+            f"delta_compatible={len(delta_compatible)} "
+            f"dte_range=({dte_min},{dte_max}) "
+            f"option_type={leg.option_type} "
+            f"delta_target={leg.delta_target}"
+        )
+
     dte_min, dte_max = _get_leg_dte_bounds(strategy, leg, leg_index)
-    return filter_quotes_for_constraints(
+    filtered = filter_quotes_for_constraints(
         quotes=quotes,
         option_type=leg.option_type,
         dte_min=dte_min,
@@ -579,6 +701,35 @@ def _filter_quotes_for_leg(
         max_rel_spread=strategy.constraints.max_rel_spread,
         min_quote_size=strategy.constraints.min_quote_size,
     )
+
+    if (
+        not filtered
+        and _is_vertical_strategy(strategy.strategy_type)
+        and leg_index == 0
+        and dte_min is not None
+        and dte_max is not None
+    ):
+        fallback_dte_min = max(10, dte_min - 10)
+        fallback_dte_max = dte_max + 20
+        if fallback_dte_min != dte_min or fallback_dte_max != dte_max:
+            fallback_filtered = filter_quotes_for_constraints(
+                quotes=quotes,
+                option_type=leg.option_type,
+                dte_min=fallback_dte_min,
+                dte_max=fallback_dte_max,
+                max_rel_spread=strategy.constraints.max_rel_spread,
+                min_quote_size=strategy.constraints.min_quote_size,
+            )
+            _vertical_trace(
+                strategy.strategy_type,
+                f"first_leg_dte_fallback primary_dte=({dte_min},{dte_max}) "
+                f"fallback_dte=({fallback_dte_min},{fallback_dte_max}) "
+                f"fallback_count={len(fallback_filtered)}"
+            )
+            if fallback_filtered:
+                return fallback_filtered
+
+    return filtered
 
 
 def resolve_strategy_from_snapshot(
@@ -593,8 +744,19 @@ def resolve_strategy_from_snapshot(
 
     logger.debug(f"[resolver] total quotes = {len(quotes)}")
     logger.debug(f"[resolver] strategy_type = {strategy.strategy_type}")
+    if _is_vertical_strategy(strategy.strategy_type):
+        second_leg_spec = strategy.legs[1] if len(strategy.legs) >= 2 else None
+        _vertical_trace(
+            strategy.strategy_type,
+            f"start quotes={len(quotes)} spot={spot} "
+            f"first_leg_target_delta={strategy.legs[0].delta_target} "
+            f"first_leg_target_strike_pct={strategy.legs[0].strike_pct_target} "
+            f"second_leg_target_delta={getattr(second_leg_spec, 'delta_target', None)} "
+            f"second_leg_target_strike_pct={getattr(second_leg_spec, 'strike_pct_target', None)}"
+        )
 
     if not quotes:
+        _vertical_trace(strategy.strategy_type, "return_none_reason=no_quotes")
         return None
 
     resolved_legs: List[ResolvedLeg] = []
@@ -607,15 +769,24 @@ def resolve_strategy_from_snapshot(
 
     first_filtered = _filter_quotes_for_leg(quotes, strategy, first_leg_spec, 0)
     logger.debug(f"[resolver] first leg filtered quotes = {len(first_filtered)}")
+    if _is_vertical_strategy(strategy.strategy_type):
+        first_expiries = sorted({q["expiry_date"] for q in first_filtered if q.get("expiry_date") is not None})
+        _vertical_trace(
+            strategy.strategy_type,
+            f"first_leg_filtered_count={len(first_filtered)} candidate_expiries={first_expiries}"
+        )
 
     if not first_filtered:
+        _vertical_trace(strategy.strategy_type, "return_none_reason=first_leg_no_filtered_quotes")
         return None
 
     first_grouped = group_by_expiry(first_filtered)
     first_expiry = choose_expiry(first_grouped, first_leg_spec.expiry_rule)
     logger.debug(f"[resolver] first_expiry = {first_expiry}")
     if first_expiry is None:
+        _vertical_trace(strategy.strategy_type, "return_none_reason=first_leg_no_expiry")
         return None
+    _vertical_trace(strategy.strategy_type, f"selected_expiry={first_expiry}")
 
     if strategy.strategy_type in ("call_calendar", "put_calendar"):
         if len(strategy.legs) < 2:
@@ -644,7 +815,17 @@ def resolve_strategy_from_snapshot(
 
     logger.debug(f"[resolver] first_leg_quote found = {first_leg_quote is not None}")
     if first_leg_quote is None:
+        _vertical_trace(
+            strategy.strategy_type,
+            f"return_none_reason=first_leg_not_found expiry={first_expiry} "
+            f"target_delta={first_leg_spec.delta_target} target_strike_pct={first_leg_spec.strike_pct_target}"
+        )
         return None
+    _vertical_trace(
+        strategy.strategy_type,
+        f"first_leg_found expiry={first_expiry} strike={first_leg_quote.get('strike')} "
+        f"delta={first_leg_quote.get('delta')} contract_id={first_leg_quote.get('contract_id')}"
+    )
 
     resolved_legs.append(build_resolved_leg(
         first_leg_quote,
@@ -659,6 +840,23 @@ def resolve_strategy_from_snapshot(
         logger.debug(f"[resolver] second leg dte range = {second_dte_min} ~ {second_dte_max}")
 
         if strategy.strategy_type in ("bear_call_spread", "bull_put_spread", "bull_call_spread", "bear_put_spread"):
+            same_expiry_vertical_pool = [
+                q for q in first_filtered
+                if q.get("option_type") == second_leg_spec.option_type and q.get("expiry_date") == first_expiry
+            ]
+            directional_candidates = []
+            if first_leg_quote is not None:
+                first_strike = first_leg_quote.get("strike")
+                if strategy.strategy_type in ("bear_call_spread", "bull_call_spread"):
+                    directional_candidates = [q for q in same_expiry_vertical_pool if q.get("strike") is not None and first_strike is not None and q["strike"] > first_strike]
+                elif strategy.strategy_type in ("bull_put_spread", "bear_put_spread"):
+                    directional_candidates = [q for q in same_expiry_vertical_pool if q.get("strike") is not None and first_strike is not None and q["strike"] < first_strike]
+            _vertical_trace(
+                strategy.strategy_type,
+                f"second_leg_targets expiry={first_expiry} option_type={second_leg_spec.option_type} "
+                f"target_delta={second_leg_spec.delta_target} target_strike_pct={second_leg_spec.strike_pct_target} "
+                f"same_expiry_pool_count={len(same_expiry_vertical_pool)} directional_candidate_count={len(directional_candidates)}"
+            )
             if second_leg_spec.strike_pct_target is not None:
                 second_leg_quote = choose_by_strike_pct(
                     quotes=first_filtered,
@@ -667,6 +865,14 @@ def resolve_strategy_from_snapshot(
                     spot=spot,
                     strike_pct=second_leg_spec.strike_pct_target,
                 )
+                if second_leg_quote is None:
+                    _vertical_trace(strategy.strategy_type, "second_leg_reason=strike_pct_target_no_match")
+                else:
+                    _vertical_trace(
+                        strategy.strategy_type,
+                        f"second_leg_pick=strike_pct_target expiry={first_expiry} "
+                        f"picked_strike={second_leg_quote.get('strike')} picked_delta={second_leg_quote.get('delta')}"
+                    )
             else:
                 second_leg_quote = choose_vertical_buy_leg(
                     quotes=first_filtered,
@@ -712,7 +918,13 @@ def resolve_strategy_from_snapshot(
 
         logger.debug(f"[resolver] second_leg_quote found = {second_leg_quote is not None}")
         if second_leg_quote is None:
+            _vertical_trace(strategy.strategy_type, "return_none_reason=second_leg_not_found")
             return None
+        _vertical_trace(
+            strategy.strategy_type,
+            f"second_leg_found strike={second_leg_quote.get('strike')} delta={second_leg_quote.get('delta')} "
+            f"contract_id={second_leg_quote.get('contract_id')}"
+        )
 
         resolved_legs.append(build_resolved_leg(
             second_leg_quote,
@@ -722,6 +934,10 @@ def resolve_strategy_from_snapshot(
         ))
 
     net_premium, net_credit, net_debit = calc_net_premium(resolved_legs)
+    _vertical_trace(
+        strategy.strategy_type,
+        f"resolved_success legs={len(resolved_legs)} net_credit={net_credit} net_debit={net_debit}"
+    )
 
     return ResolvedStrategy(
         strategy_type=strategy.strategy_type,

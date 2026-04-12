@@ -26,6 +26,56 @@ _PROFIT_CONDITIONS = {
     "covered_call":    "标的横盘或温和上涨，call到期虚值",
 }
 
+_STRONG_RECOMMENDATION_THRESHOLD = 0.80
+_REFERENCE_CANDIDATE_THRESHOLD = 0.60
+
+
+def _score_tier(score: float) -> str:
+    if score >= _STRONG_RECOMMENDATION_THRESHOLD:
+        return "strong_recommendation"
+    if score >= _REFERENCE_CANDIDATE_THRESHOLD:
+        return "reference_candidate"
+    return "weak_match_watchlist"
+
+
+def _score_tier_label(score: float) -> str:
+    tier = _score_tier(score)
+    if tier == "strong_recommendation":
+        return "强推荐"
+    if tier == "reference_candidate":
+        return "参考候选"
+    return "弱匹配/观察"
+
+
+def _build_presentation_summary(top: List[Any]) -> Dict[str, Any]:
+    if not top:
+        return {
+            "overall_tier": "no_candidate",
+            "overall_label": "无候选",
+            "top_score": None,
+            "note": "当前没有可展示的候选策略。",
+        }
+
+    top_score = float(top[0].score or 0.0)
+    tier = _score_tier(top_score)
+    if tier == "strong_recommendation":
+        note = ""
+        label = "强推荐"
+    elif tier == "reference_candidate":
+        note = "当前没有特别强的匹配，以下策略更适合作为参考候选，而不是明确主推。"
+        label = "参考候选"
+    else:
+        note = "当前没有强匹配，以下返回策略仅属于弱匹配/观察清单，不宜视为明确推荐。"
+        label = "弱匹配/观察"
+
+    return {
+        "overall_tier": tier,
+        "overall_label": label,
+        "top_score": round(top_score, 3),
+        "note": note,
+    }
+
+
 def build_briefing(
     ranked: List,
     intent_text: str,
@@ -37,6 +87,7 @@ def build_briefing(
     market_context: {uid: ctx_dict}，用于在简报里体现机器判断。
     """
     top = ranked[:top_n]
+    presentation = _build_presentation_summary(top)
 
     # ── 表格部分 ──
     table = []
@@ -67,6 +118,8 @@ def build_briefing(
             "underlying":       s.underlying_id,
             "strategy":         s.strategy_type,
             "score":            round(s.score, 3),
+            "score_tier":       _score_tier(s.score),
+            "score_tier_label": _score_tier_label(s.score),
             "cost":             cost_str,
             "legs":             legs_str,
             "net_delta":        round(ng.get("net_delta") or 0, 3),
@@ -99,6 +152,9 @@ def build_briefing(
             f"delta={row['net_delta']} vega={row['net_vega']} theta={row['net_theta']} "
             f"flags={row['risk_flags']}"
         )
+    if presentation["note"]:
+        ctx_lines.append(f"\n呈现层级：{presentation['note']}")
+
     ctx = "\n".join(ctx_lines)
 
     system = """你是一个A股ETF期权交易助手，面向有经验的交易者。
@@ -121,7 +177,11 @@ def build_briefing(
         print(f"[briefing] LLM failed: {e}")
         narrative = "（简报生成失败）"
 
+    if presentation["note"]:
+        narrative = f"{presentation['note']}\n\n{narrative}" if narrative else presentation["note"]
+
     return {
         "table":     table,
         "narrative": narrative,
+        "presentation": presentation,
     }
