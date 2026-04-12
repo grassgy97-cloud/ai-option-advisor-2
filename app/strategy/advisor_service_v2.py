@@ -390,15 +390,62 @@ def build_disabled_backtest(resolved_candidates):
     }
 
 
-def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> AdvisorRunResponse:
+def run_advisor(
+    engine: Engine,
+    text: str,
+    underlying_id: str = "510300",
+    underlying_ids: Optional[List[str]] = None,
+) -> AdvisorRunResponse:
     from app.data.market_context import build_market_context_multi
     import time
 
     t0_all = time.perf_counter()
+    cache: Dict[Any, Any] = {}
+
+    explicit_underlying_ids = [str(uid) for uid in (underlying_ids or []) if uid]
+    print(
+        "[multi_run_check] "
+        f"service_input underlying_id={underlying_id} "
+        f"underlying_ids={explicit_underlying_ids if explicit_underlying_ids else underlying_ids}"
+    )
+    if explicit_underlying_ids:
+        seen = set()
+        target_ids: List[str] = []
+        for uid in explicit_underlying_ids:
+            if uid not in seen:
+                target_ids.append(uid)
+                seen.add(uid)
+    elif underlying_id == "ALL":
+        target_ids = list(ALL_UNDERLYING_IDS)
+    else:
+        target_ids = [underlying_id]
+    combined_mode = len(target_ids) > 1 or underlying_id == "ALL"
+    print(f"[multi_run_check] request_underlying_ids={target_ids}")
+    print(f"[multi_run_check] combined_mode={combined_mode}")
+    print(f"[multi_run_check] target_ids_before_loop={target_ids}")
 
     # 扫描模式：先为全部候选标的准备上下文
     # 单标的模式：只准备当前标的
-    ctx_ids = ALL_UNDERLYING_IDS if underlying_id == "ALL" else [underlying_id]
+    ctx_ids = list(target_ids)
+
+    def _get_iv_report(uid: str) -> Optional[Dict[str, Any]]:
+        key = ("atm_iv", uid)
+        if key in cache:
+            return cache[key]
+        rpt = build_iv_percentile_report(engine, uid)
+        cache[key] = rpt
+        return rpt
+
+    def _get_market_context(
+        uids: List[str],
+        iv_pct_map: Dict[str, Optional[float]],
+    ) -> Dict[str, Any]:
+        missing_ids = [uid for uid in uids if ("market_context", uid) not in cache]
+        if missing_ids:
+            built = build_market_context_multi(engine, missing_ids, iv_pcts=iv_pct_map)
+            for uid in missing_ids:
+                cache[("market_context", uid)] = (built or {}).get(uid, {})
+        return {uid: cache.get(("market_context", uid), {}) for uid in uids}
 
     # 先算 iv_percentile：既给 market_context 用，也给后续 greeks_report 复用
     t0 = time.perf_counter()
@@ -407,7 +454,7 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
 
     for uid in ctx_ids:
         try:
-            rpt = build_iv_percentile_report(engine, uid)
+            rpt = _get_iv_report(uid)
             iv_reports[uid] = rpt
             if rpt:
                 iv_pcts[uid] = rpt.get("composite_percentile")
@@ -423,7 +470,7 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
     # 计算 market_context
     t0 = time.perf_counter()
     try:
-        market_context = build_market_context_multi(engine, ctx_ids, iv_pcts=iv_pcts)
+        market_context = _get_market_context(ctx_ids, iv_pcts)
     except Exception as e:
         print(f"[run_advisor] market_context failed: {e}")
         market_context = {}
@@ -431,25 +478,23 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
 
     # 解析意图（含二八合成）
     t0 = time.perf_counter()
+    print(f"[multi_run_check] before_parse underlying_ids={target_ids}")
     intent = parse_text_to_intent(
         text=text,
-        underlying_id=underlying_id,
+        underlying_id=target_ids[0],
         market_context=market_context,
     )
+    print("[multi_run_check] after_parse parse_called_once=True")
     print(f"[timing] parse_text_to_intent = {time.perf_counter() - t0:.3f}s")
 
     # 这里先保持你当前语义：
     # 单标的请求强制只跑传入 uid；
     # ALL 模式仍由 intent.effective_underlying_ids 决定。
     # （如果你后面要改成“ALL 强制全扫”，那是下一步。）
-    if underlying_id == "ALL":
-        target_ids = list(ALL_UNDERLYING_IDS)
-        intent = intent.model_copy(update={
-            "underlying_id": target_ids[0],
-            "underlying_ids": target_ids,
-        })
-    else:
-        target_ids = [underlying_id]
+    intent = intent.model_copy(update={
+        "underlying_id": target_ids[0],
+        "underlying_ids": target_ids,
+    })
 
     all_resolved: List[ResolvedStrategy] = []
     compile_resolve_summary: List[Dict[str, Any]] = []
@@ -502,6 +547,8 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
             for item in compile_resolve_summary
         )
         print(f"[advisor_summary] {summary_text}")
+    resolved_underlying_ids_after_loop = sorted({s.underlying_id for s in all_resolved})
+    print(f"[multi_run_check] resolved_underlying_ids_after_loop={resolved_underlying_ids_after_loop}")
 
     t0 = time.perf_counter()
     ranked = rank_strategies(all_resolved)
@@ -527,6 +574,14 @@ def run_advisor(engine: Engine, text: str, underlying_id: str = "510300") -> Adv
     )
     resp.calendar_recommendations = []
     resp.briefing = build_briefing(ranked, text, market_context=market_context)
+    combined_resolved_underlying_ids = sorted({s.underlying_id for s in ranked})
+    briefing_market_overview_ids = [
+        item.get("underlying_id")
+        for item in ((resp.briefing or {}).get("market_overview") or [])
+        if item.get("underlying_id")
+    ]
+    print(f"[multi_run_check] combined_resolved_underlying_ids={combined_resolved_underlying_ids}")
+    print(f"[multi_run_check] briefing_market_overview_ids={briefing_market_overview_ids}")
     print(f"[timing] build_briefing + response = {time.perf_counter() - t0:.3f}s")
 
     print(f"[timing] run_advisor TOTAL = {time.perf_counter() - t0_all:.3f}s")

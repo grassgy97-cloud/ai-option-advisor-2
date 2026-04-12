@@ -19,6 +19,11 @@ _VERTICAL_STRATEGY_TYPES = {
     "bull_put_spread",
     "bear_put_spread",
 }
+_DIAGONAL_STRATEGY_TYPES = {
+    "diagonal_call",
+    "diagonal_put",
+}
+_SAME_STRIKE_THRESHOLD = 1e-6
 
 
 def _is_vertical_strategy(strategy_type: str) -> bool:
@@ -28,6 +33,10 @@ def _is_vertical_strategy(strategy_type: str) -> bool:
 def _vertical_trace(strategy_type: str, message: str) -> None:
     if _is_vertical_strategy(strategy_type):
         print(f"[vertical_resolver] strategy_type={strategy_type} {message}")
+
+
+def _is_diagonal_strategy(strategy_type: str) -> bool:
+    return strategy_type in _DIAGONAL_STRATEGY_TYPES
 
 
 @dataclass
@@ -920,6 +929,22 @@ def resolve_strategy_from_snapshot(
         if second_leg_quote is None:
             _vertical_trace(strategy.strategy_type, "return_none_reason=second_leg_not_found")
             return None
+        if _is_diagonal_strategy(strategy.strategy_type):
+            first_strike = first_leg_quote.get("strike")
+            second_strike = second_leg_quote.get("strike")
+            if (
+                first_strike is not None
+                and second_strike is not None
+                and abs(float(first_strike) - float(second_strike)) < _SAME_STRIKE_THRESHOLD
+            ):
+                print(
+                    "[diagonal_resolver] rejected_same_strike "
+                    f"strategy_type={strategy.strategy_type} "
+                    f"expiry1={first_leg_quote.get('expiry_date')} "
+                    f"expiry2={second_leg_quote.get('expiry_date')} "
+                    f"strike1={first_strike} strike2={second_strike}"
+                )
+                return None
         _vertical_trace(
             strategy.strategy_type,
             f"second_leg_found strike={second_leg_quote.get('strike')} delta={second_leg_quote.get('delta')} "

@@ -275,6 +275,7 @@ class CalendarRecommendation(BaseModel):
 class AdvisorRunRequest(BaseModel):
     text: str
     underlying_id: Optional[str] = "510300"
+    underlying_ids: Optional[List[str]] = None
 
 
 class AdvisorRunResponse(BaseModel):

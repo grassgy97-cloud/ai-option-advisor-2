@@ -80,6 +80,7 @@ _OPPORTUNITY_FAMILY_WEIGHTS: Dict[OpportunityType, Dict[StrategyFamily, float]] 
 _CALENDAR_TERM_THRESHOLD = 0.45
 _CALENDAR_SURFACE_THRESHOLD = 0.60
 _DIAGONAL_DIRECTION_THRESHOLD = 0.40
+_VERTICAL_SOFT_FALLBACK_WEIGHT = 0.48
 _USER_SOFT_PRIORITY_WEIGHT = 1.00
 _INFERRED_SOFT_PRIORITY_WEIGHT = 0.60
 _MACHINE_SOFT_PRIORITY_WEIGHT = 0.35
@@ -644,6 +645,80 @@ def _backfill_vertical_strategy_types(
     )
 
     return best_map
+
+
+def _inject_soft_vertical_fallback(
+    best_map: Dict[str, float],
+    family_candidate_map: Dict[StrategyFamily, FamilyCandidate],
+    constraints: FamilyConstraintBundle,
+    intent: IntentSpec,
+) -> tuple[Dict[str, float], Dict[StrategyFamily, FamilyCandidate]]:
+    vertical_candidate = family_candidate_map.get("vertical")
+    vertical_missing = vertical_candidate is None or not vertical_candidate.shortlisted
+    hard_reason = _hard_family_exclusion_reason("vertical", constraints)
+
+    directional_bias = (
+        intent.market_view in ("bullish", "bearish")
+        or intent.asymmetry in ("upside", "downside")
+    )
+    skew_bias = intent.vol_view in ("call_iv_rich", "put_iv_rich")
+    should_inject = (
+        vertical_missing
+        and hard_reason is None
+        and (
+            intent.defined_risk_only
+            or directional_bias
+            or skew_bias
+        )
+    )
+
+    if not should_inject:
+        print(
+            "[vertical_trace] "
+            f"uid={intent.underlying_id} "
+            "fallback_injected=False "
+            f"reason={'hard_excluded' if hard_reason is not None else 'not_needed_or_not_applicable'}"
+        )
+        return best_map, family_candidate_map
+
+    inserted: List[str] = []
+    if intent.market_view == "bullish" or intent.asymmetry == "upside":
+        best_map["bull_call_spread"] = max(best_map.get("bull_call_spread", 0.0), _VERTICAL_SOFT_FALLBACK_WEIGHT)
+        inserted.append("bull_call_spread")
+    elif intent.market_view == "bearish" or intent.asymmetry == "downside":
+        best_map["bear_put_spread"] = max(best_map.get("bear_put_spread", 0.0), _VERTICAL_SOFT_FALLBACK_WEIGHT)
+        inserted.append("bear_put_spread")
+    else:
+        best_map["bull_call_spread"] = max(best_map.get("bull_call_spread", 0.0), _VERTICAL_SOFT_FALLBACK_WEIGHT)
+        best_map["bear_put_spread"] = max(best_map.get("bear_put_spread", 0.0), _VERTICAL_SOFT_FALLBACK_WEIGHT)
+        inserted.extend(["bull_call_spread", "bear_put_spread"])
+
+    if vertical_candidate is None:
+        vertical_candidate = FamilyCandidate(
+            family="vertical",
+            underlying_id=intent.underlying_id,
+            opportunity_type="directional_defined_risk",
+            score=_VERTICAL_SOFT_FALLBACK_WEIGHT,
+            confidence=_VERTICAL_SOFT_FALLBACK_WEIGHT,
+            shortlisted=True,
+            shortlist_reasons=["soft vertical fallback"],
+            metadata={"metadata_mode": "soft_vertical_fallback"},
+        )
+        family_candidate_map["vertical"] = vertical_candidate
+    else:
+        vertical_candidate.shortlisted = True
+        vertical_candidate.score = round(max(float(vertical_candidate.score or 0.0), _VERTICAL_SOFT_FALLBACK_WEIGHT), 4)
+        vertical_candidate.confidence = round(max(float(vertical_candidate.confidence or 0.0), _VERTICAL_SOFT_FALLBACK_WEIGHT), 4)
+        vertical_candidate.shortlist_reasons = ["soft vertical fallback"]
+        vertical_candidate.metadata["soft_vertical_fallback"] = True
+
+    print(
+        "[vertical_trace] "
+        f"uid={intent.underlying_id} "
+        "fallback_injected=True "
+        f"inserted={inserted}"
+    )
+    return best_map, family_candidate_map
 
 
 def _select_family_shortlist(
@@ -1571,6 +1646,13 @@ def compile_intent_to_strategies(
             for strategy_type, weight in best_map.items()
             if _strategy_family_for_type(strategy_type) in shortlisted_families
         }
+
+    best_map, family_candidate_map = _inject_soft_vertical_fallback(
+        best_map=best_map,
+        family_candidate_map=family_candidate_map,
+        constraints=family_constraints,
+        intent=intent,
+    )
 
     best_map = _backfill_vertical_strategy_types(
         best_map=best_map,

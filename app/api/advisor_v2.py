@@ -15,10 +15,16 @@ router = APIRouter(prefix="/advisor", tags=["advisor"])
 @router.post("/run")
 def advisor_run(req: AdvisorRunRequest):
     try:
+        print(
+            "[multi_run_check] "
+            f"api_request underlying_id={req.underlying_id} "
+            f"underlying_ids={req.underlying_ids}"
+        )
         result = run_advisor(
             engine=engine,
             text=req.text,
             underlying_id=req.underlying_id or "510300",
+            underlying_ids=req.underlying_ids,
         )
         return {"ok": True, "data": result.model_dump()}
     except HTTPException:

@@ -516,43 +516,26 @@ async function runAdvisor() {
   const timeoutId = setTimeout(() => controller.abort(), 200000);
 
   try {
-    const idsToRun = isAll ? ['ALL'] : selectedIds;
+    const payload = isAll
+      ? { text: finalText, underlying_id: 'ALL' }
+      : selectedIds.length > 1
+        ? { text: finalText, underlying_ids: selectedIds }
+        : { text: finalText, underlying_id: underlyingId };
 
-    const results = await Promise.all(idsToRun.map(async uid => {
-      const resp = await fetch('/advisor/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: finalText, underlying_id: uid }),
-        signal: controller.signal,
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = await resp.json();
-      return data.data || data;
-    }));
+    console.log('[frontend_multi_check] selectedIds=', selectedIds);
+    console.log('[frontend_multi_check] payload=', payload);
 
-    let allRows = [];
-    let narrative = '';
-    let intentData = null;
-    let presentation = null;
+    const resp = await fetch('/advisor/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const raw = await resp.json();
+    const result = raw.data || raw;
 
-    for (const d of results) {
-      if (!intentData) intentData = d.parsed_intent;
-      const rows = (d.briefing || {}).table || [];
-      allRows = allRows.concat(rows);
-      if (!narrative && (d.briefing || {}).narrative) {
-        narrative = d.briefing.narrative;
-      }
-      if (!presentation && (d.briefing || {}).presentation) {
-        presentation = d.briefing.presentation;
-      }
-    }
-
-    if (idsToRun.length > 1) {
-      allRows.sort((a, b) => b.score - a.score);
-      allRows = allRows.slice(0, 10).map((r, i) => ({ ...r, rank: i + 1 }));
-    }
-
-    renderResult({ parsed_intent: intentData, briefing: { table: allRows, narrative, presentation } });
+    renderResult(result);
     status.className = '';
     status.textContent = '';
   } catch(e) {
