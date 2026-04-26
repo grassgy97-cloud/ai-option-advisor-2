@@ -98,6 +98,86 @@ def _clip01(v: float) -> float:
     return max(0.0, min(1.0, v))
 
 
+def _horizon_views(intent: IntentSpec) -> Dict[str, Any]:
+    value = getattr(intent, "horizon_views", None)
+    return value if isinstance(value, dict) else {}
+
+
+def _horizon_term_signal(intent: IntentSpec) -> Dict[str, Any]:
+    views = _horizon_views(intent)
+    short = views.get("short_term") if isinstance(views.get("short_term"), dict) else {}
+    medium = views.get("medium_term") if isinstance(views.get("medium_term"), dict) else {}
+    short_direction = short.get("direction", "unknown")
+    medium_direction = medium.get("direction", "unknown")
+    short_vol = short.get("vol_bias", "unknown")
+    medium_vol = medium.get("vol_bias", "unknown")
+    try:
+        short_strength = float(short.get("direction_strength", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        short_strength = 0.0
+
+    direction_divergence = bool(
+        short_direction in ("bearish", "bullish")
+        and medium_direction in ("neutral", "unknown")
+    )
+    vol_term_signal = bool(short_vol == "up" and medium_vol in ("down", "flat", "unknown"))
+    side = "put" if short_direction == "bearish" else "call" if short_direction == "bullish" else None
+    strength = 0.0
+    if direction_divergence:
+        strength = max(strength, 0.55 + 0.20 * _clip01(short_strength))
+    if vol_term_signal:
+        strength = max(strength, 0.65)
+    return {
+        "has_horizon_views": bool(views),
+        "direction_divergence": direction_divergence,
+        "vol_term_signal": vol_term_signal,
+        "term_structure_support": round(_clip01(strength), 4),
+        "side": side,
+        "short_direction": short_direction,
+        "medium_direction": medium_direction,
+        "short_vol_bias": short_vol,
+        "medium_vol_bias": medium_vol,
+    }
+
+
+def _vol_view_detail(intent: IntentSpec) -> Dict[str, Any]:
+    value = getattr(intent, "vol_view_detail", None)
+    return value if isinstance(value, dict) else {}
+
+
+def _vol_detail_signal(intent: IntentSpec) -> Dict[str, Any]:
+    detail = _vol_view_detail(intent)
+    atm = detail.get("atm") if isinstance(detail.get("atm"), dict) else {}
+    call = detail.get("call") if isinstance(detail.get("call"), dict) else {}
+    put = detail.get("put") if isinstance(detail.get("put"), dict) else {}
+    skew = detail.get("skew") if isinstance(detail.get("skew"), dict) else {}
+    term = detail.get("term") if isinstance(detail.get("term"), dict) else {}
+
+    atm_short_up = atm.get("expected_change") == "up" and atm.get("horizon") in ("short_term", "unknown")
+    term_front_rich = term.get("front") == "rich"
+    term_support = 0.0
+    if atm_short_up:
+        term_support = max(term_support, 0.55)
+    if term_front_rich:
+        term_support = max(term_support, 0.50)
+
+    put_rich = put.get("level") == "rich" or skew.get("direction") == "put_rich"
+    call_rich = call.get("level") == "rich" or skew.get("direction") == "call_rich"
+    call_flat_down = call.get("expected_change") in ("flat", "down")
+    call_cheap = call.get("level") == "cheap"
+
+    return {
+        "has_vol_detail": bool(detail),
+        "term_support": round(_clip01(term_support), 4),
+        "atm_short_up": atm_short_up,
+        "term_front_rich": term_front_rich,
+        "put_rich": put_rich,
+        "call_rich": call_rich,
+        "call_flat_down": call_flat_down,
+        "call_cheap": call_cheap,
+    }
+
+
 def _family_diag_presence(strategy_types: Any) -> Dict[str, bool]:
     active = set(strategy_types or [])
     return {strategy_type: (strategy_type in active) for strategy_type in _FAMILY_DIAG_STRATEGY_TYPES}
@@ -170,6 +250,8 @@ def _build_opportunity_evidence_summary(
     iv_pct: Optional[float] = None,
 ) -> Dict[str, Any]:
     uid_ctx = _get_uid_ctx(intent)
+    horizon_signal = _horizon_term_signal(intent)
+    vol_detail_signal = _vol_detail_signal(intent)
     term_slope_call = float(uid_ctx.get("term_slope_call") or 0.0)
     term_slope_put = float(uid_ctx.get("term_slope_put") or 0.0)
     skew = float(uid_ctx.get("put_call_skew") or 0.0)
@@ -224,7 +306,17 @@ def _build_opportunity_evidence_summary(
         "iv_rich_strength": round(iv_rich_strength, 4),
         "low_iv_convexity_strength": round(low_iv_convexity_strength, 4),
         "covered_income_signal": round(covered_income_signal, 4),
+        "horizon_term_strength": horizon_signal["term_structure_support"],
+        "horizon_direction_divergence": horizon_signal["direction_divergence"],
+        "horizon_vol_term_signal": horizon_signal["vol_term_signal"],
+        "horizon_side": horizon_signal["side"],
+        "vol_detail_term_strength": vol_detail_signal["term_support"],
+        "vol_detail_put_rich": vol_detail_signal["put_rich"],
+        "vol_detail_call_flat_down": vol_detail_signal["call_flat_down"],
+        "vol_detail_call_cheap": vol_detail_signal["call_cheap"],
         "explicit_term_signal": intent.vol_view in ("term_front_high", "term_back_high"),
+        "explicit_horizon_signal": horizon_signal["term_structure_support"] > 0,
+        "explicit_vol_detail_signal": vol_detail_signal["has_vol_detail"],
     }
 
 
@@ -237,6 +329,8 @@ def derive_opportunity_candidates(
 
     direction_strength = float(evidence["direction_strength"])
     term_carry_strength = float(evidence["term_carry_strength"])
+    horizon_term_strength = float(evidence.get("horizon_term_strength", 0.0) or 0.0)
+    vol_detail_term_strength = float(evidence.get("vol_detail_term_strength", 0.0) or 0.0)
     surface_rv_strength = float(evidence["surface_rv_strength"])
     iv_rich_strength = float(evidence["iv_rich_strength"])
     low_iv_convexity_strength = float(evidence["low_iv_convexity_strength"])
@@ -307,17 +401,23 @@ def derive_opportunity_candidates(
             },
         ))
 
-    if term_carry_strength > 0 or surface_rv_strength > 0 or evidence["explicit_term_signal"]:
-        score = max(term_carry_strength, min(0.85, surface_rv_strength * 0.9), 0.45 if evidence["explicit_term_signal"] else 0.0)
+    if term_carry_strength > 0 or horizon_term_strength > 0 or vol_detail_term_strength > 0 or surface_rv_strength > 0 or evidence["explicit_term_signal"]:
+        score = max(
+            term_carry_strength,
+            horizon_term_strength,
+            vol_detail_term_strength,
+            min(0.85, surface_rv_strength * 0.9),
+            0.45 if evidence["explicit_term_signal"] else 0.0,
+        )
         candidates.append(OpportunityCandidate(
             opportunity_type="term_structure_carry",
             underlying_id=intent.underlying_id,
             score=round(score, 4),
-            confidence=round(max(term_carry_strength, surface_rv_strength), 4),
+            confidence=round(max(term_carry_strength, horizon_term_strength, vol_detail_term_strength, surface_rv_strength), 4),
             evidence=evidence,
             rationale="surface carry or relative-value signal between maturities",
             source_flags={
-                "explicit_user_signal": bool(evidence["explicit_term_signal"]),
+                "explicit_user_signal": bool(evidence["explicit_term_signal"] or evidence.get("explicit_horizon_signal") or evidence.get("explicit_vol_detail_signal")),
                 "inferred_signal": intent.vol_view in ("call_iv_rich", "put_iv_rich"),
                 "machine_signal": term_carry_strength > 0 or surface_rv_strength > 0,
             },
@@ -367,6 +467,11 @@ def build_family_constraints(
             bundle.user_hard.banned_families.append("naked_short")
         bundle.user_hard.notes.append("defined_risk_only")
 
+    if getattr(intent, "ban_naked_short", False):
+        if "naked_short" not in bundle.user_hard.banned_families:
+            bundle.user_hard.banned_families.append("naked_short")
+        bundle.user_hard.notes.append("ban_naked_short")
+
     if intent.prefer_multi_leg:
         bundle.user_soft.prefer_multi_leg = True
         bundle.user_soft.weights.update({
@@ -377,9 +482,48 @@ def build_family_constraints(
         })
         bundle.user_soft.notes.append("prefer_multi_leg")
 
+    horizon_signal = _horizon_term_signal(intent)
+    if horizon_signal["term_structure_support"] > 0:
+        bundle.user_soft.weights["calendar"] = max(bundle.user_soft.weights.get("calendar", 0.0), 0.14)
+        bundle.user_soft.weights["diagonal"] = max(bundle.user_soft.weights.get("diagonal", 0.0), 0.12)
+        bundle.user_soft.notes.append("horizon_term_preference")
+
+    vol_detail_signal = _vol_detail_signal(intent)
+    if vol_detail_signal["term_support"] > 0:
+        bundle.user_soft.weights["calendar"] = max(bundle.user_soft.weights.get("calendar", 0.0), 0.12)
+        bundle.user_soft.weights["diagonal"] = max(bundle.user_soft.weights.get("diagonal", 0.0), 0.10)
+        bundle.user_soft.notes.append("vol_detail_term_preference")
+    if vol_detail_signal["put_rich"] or vol_detail_signal["call_flat_down"] or vol_detail_signal["call_cheap"]:
+        bundle.user_soft.weights["vertical"] = max(bundle.user_soft.weights.get("vertical", 0.0), 0.12)
+        bundle.user_soft.notes.append("vol_detail_side_preference")
+
+    income_bias = bool(getattr(intent, "require_positive_theta", False) or getattr(intent, "prefer_income_family", False))
+    range_bias = getattr(intent, "range_bias", None)
+    neutral_income = bool(
+        income_bias
+        and range_bias in ("strict_range", "weak_bearish_range", "weak_bullish_range")
+    )
+    if income_bias:
+        if range_bias == "strict_range":
+            bundle.user_soft.weights["iron"] = max(bundle.user_soft.weights.get("iron", 0.0), 0.24)
+            bundle.user_soft.weights["vertical"] = max(bundle.user_soft.weights.get("vertical", 0.0), 0.10)
+            bundle.user_soft.notes.append("neutral_income_range_preference")
+        elif range_bias in ("weak_bearish_range", "weak_bullish_range"):
+            bundle.user_soft.weights["iron"] = max(bundle.user_soft.weights.get("iron", 0.0), 0.16)
+            bundle.user_soft.weights["vertical"] = max(bundle.user_soft.weights.get("vertical", 0.0), 0.16)
+            bundle.user_soft.notes.append("weak_range_income_preference")
+        else:
+            bundle.user_soft.weights["vertical"] = max(bundle.user_soft.weights.get("vertical", 0.0), 0.18)
+            bundle.user_soft.weights["iron"] = max(bundle.user_soft.weights.get("iron", 0.0), 0.14)
+            bundle.user_soft.notes.append("positive_theta_income_preference")
+
     if intent.market_view in ("bullish", "bearish"):
         bundle.inferred_soft.weights["vertical"] = 0.10
-        bundle.inferred_soft.weights["long_single"] = 0.08
+        if getattr(intent, "require_positive_theta", False) or getattr(intent, "prefer_income_family", False) or intent.defined_risk_only:
+            if getattr(intent, "prefer_directional_backup", False):
+                bundle.inferred_soft.weights["long_single"] = 0.03
+        else:
+            bundle.inferred_soft.weights["long_single"] = 0.08
         bundle.inferred_soft.notes.append("directional market_view")
     elif intent.market_view == "neutral":
         bundle.inferred_soft.weights["iron"] = 0.10
@@ -434,8 +578,10 @@ def _build_calendar_diagonal_gate_results(
     evidence = _build_opportunity_evidence_summary(intent, iv_pct=iv_pct)
     term_strength = float(evidence["term_carry_strength"])
     surface_strength = float(evidence["surface_rv_strength"])
+    horizon_strength = float(evidence.get("horizon_term_strength", 0.0) or 0.0)
     direction_strength = float(evidence["direction_strength"])
     explicit_term_signal = bool(evidence["explicit_term_signal"])
+    explicit_horizon_signal = bool(evidence.get("explicit_horizon_signal"))
 
     calendar_reasons: List[str] = []
     if term_strength >= _CALENDAR_TERM_THRESHOLD:
@@ -444,6 +590,8 @@ def _build_calendar_diagonal_gate_results(
         calendar_reasons.append("surface_rv_strength above threshold")
     if explicit_term_signal:
         calendar_reasons.append("explicit term-structure signal")
+    if horizon_strength > 0:
+        calendar_reasons.append("explicit short/medium horizon signal")
 
     calendar_passed = bool(calendar_reasons)
     if not calendar_reasons:
@@ -452,16 +600,23 @@ def _build_calendar_diagonal_gate_results(
     diagonal_reasons = [r for r in calendar_reasons if r != "no strong term/carry evidence yet"]
     if direction_strength >= _DIAGONAL_DIRECTION_THRESHOLD:
         diagonal_reasons.append("direction_strength above threshold")
+    if explicit_horizon_signal and evidence.get("horizon_direction_divergence"):
+        diagonal_reasons.append("horizon directional divergence")
 
-    diagonal_passed = calendar_passed and direction_strength >= _DIAGONAL_DIRECTION_THRESHOLD
+    diagonal_passed = calendar_passed and (
+        direction_strength >= _DIAGONAL_DIRECTION_THRESHOLD
+        or bool(evidence.get("horizon_direction_divergence"))
+    )
     if not diagonal_reasons:
         diagonal_reasons.append("no combined carry plus directional evidence yet")
 
     gate_inputs = {
         "term_carry_strength": round(term_strength, 4),
         "surface_rv_strength": round(surface_strength, 4),
+        "horizon_term_strength": round(horizon_strength, 4),
         "direction_strength": round(direction_strength, 4),
         "explicit_term_signal": explicit_term_signal,
+        "explicit_horizon_signal": explicit_horizon_signal,
         "calendar_term_threshold": _CALENDAR_TERM_THRESHOLD,
         "calendar_surface_threshold": _CALENDAR_SURFACE_THRESHOLD,
         "diagonal_direction_threshold": _DIAGONAL_DIRECTION_THRESHOLD,
@@ -1136,7 +1291,7 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
                 ),
             ],
             constraints=common_constraints,
-            rationale="bull call spread（debit，买平值卖虚值）", metadata={},
+            rationale="bull call spread（付权利金，买平值卖虚值）", metadata={},
         )
 
     if strategy_type == "bear_call_spread":
@@ -1156,7 +1311,7 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
                 ),
             ],
             constraints=common_constraints,
-            rationale="bear call spread（credit，卖虚值买更虚值）", metadata={},
+            rationale="bear call spread（收权利金，卖虚值买更虚值）", metadata={},
         )
 
     if strategy_type == "bull_put_spread":
@@ -1176,7 +1331,7 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
                 ),
             ],
             constraints=common_constraints,
-            rationale="bull put spread（credit，卖虚值买更虚值）", metadata={},
+            rationale="bull put spread（收权利金，卖虚值买更虚值）", metadata={},
         )
 
     if strategy_type == "bear_put_spread":
@@ -1199,7 +1354,7 @@ def build_strategy_spec(strategy_type: str, intent: IntentSpec) -> StrategySpec 
                 ),
             ],
             constraints=common_constraints,
-            rationale="bear put spread（debit，买平值卖虚值）", metadata={},
+            rationale="bear put spread（付权利金，买平值卖虚值）", metadata={},
         )
 
     # ===== condor =====
@@ -1424,6 +1579,8 @@ def compile_intent_to_strategies(
     # diagonal比calendar多一个方向性因子，prior略高（+0.05，上限0.95）
     diag_prior_call = min(0.95, cal_prior_call + 0.05)
     diag_prior_put  = min(0.95, cal_prior_put  + 0.05)
+    horizon_signal = _horizon_term_signal(intent)
+    vol_detail_signal = _vol_detail_signal(intent)
 
     # ===== vol_view 驱动 =====
     if intent.vol_view == "call_iv_rich":
@@ -1504,6 +1661,94 @@ def compile_intent_to_strategies(
             ("diagonal_put",  min(0.85, diag_prior_put)),
         ]
 
+    if horizon_signal["term_structure_support"] > 0:
+        horizon_prior = max(0.62, min(0.78, horizon_signal["term_structure_support"]))
+        side = horizon_signal.get("side")
+        if side == "put":
+            candidates += [
+                ("put_calendar", horizon_prior),
+                ("diagonal_put", min(0.82, horizon_prior + 0.04)),
+            ]
+        elif side == "call":
+            candidates += [
+                ("call_calendar", horizon_prior),
+                ("diagonal_call", min(0.82, horizon_prior + 0.04)),
+            ]
+        else:
+            candidates += [
+                ("call_calendar", round(max(0.58, horizon_prior - 0.04), 3)),
+                ("put_calendar", round(max(0.58, horizon_prior - 0.04), 3)),
+            ]
+
+    if vol_detail_signal["term_support"] > 0:
+        vol_term_prior = max(0.58, min(0.70, vol_detail_signal["term_support"]))
+        candidates += [
+            ("call_calendar", vol_term_prior),
+            ("put_calendar", vol_term_prior),
+        ]
+        if vol_detail_signal["atm_short_up"]:
+            candidates += [
+                ("diagonal_call", max(0.56, round(vol_term_prior - 0.02, 3))),
+                ("diagonal_put", max(0.56, round(vol_term_prior - 0.02, 3))),
+            ]
+
+    if vol_detail_signal["put_rich"] or vol_detail_signal["call_flat_down"]:
+        candidates.append(("bear_call_spread", 0.76))
+    if vol_detail_signal["call_cheap"]:
+        candidates += [
+            ("bull_call_spread", 0.70),
+            ("diagonal_call", 0.68),
+        ]
+
+    income_bias = bool(getattr(intent, "require_positive_theta", False) or getattr(intent, "prefer_income_family", False))
+    range_bias = getattr(intent, "range_bias", None)
+    neutral_income = bool(
+        income_bias
+        and range_bias in ("strict_range", "weak_bearish_range", "weak_bullish_range")
+    )
+    if income_bias:
+        if intent.market_view == "bearish":
+            candidates += [
+                ("bear_call_spread", 0.92),
+                ("iron_condor", 0.72),
+            ]
+            if getattr(intent, "prefer_directional_backup", False):
+                candidates.append(("bear_put_spread", 0.62))
+        elif intent.market_view == "bullish":
+            candidates += [
+                ("bull_put_spread", 0.92),
+                ("iron_condor", 0.72),
+            ]
+            if getattr(intent, "prefer_directional_backup", False):
+                candidates.append(("bull_call_spread", 0.62))
+        else:
+            if range_bias == "strict_range":
+                iron_condor_prior = 0.92
+                iron_fly_prior = 0.88
+                bear_call_prior = 0.68
+                bull_put_prior = 0.68
+            elif range_bias == "weak_bearish_range":
+                iron_condor_prior = 0.80
+                iron_fly_prior = 0.72
+                bear_call_prior = 0.82
+                bull_put_prior = 0.70
+            elif range_bias == "weak_bullish_range":
+                iron_condor_prior = 0.80
+                iron_fly_prior = 0.72
+                bear_call_prior = 0.70
+                bull_put_prior = 0.82
+            else:
+                iron_condor_prior = 0.82
+                iron_fly_prior = 0.70
+                bear_call_prior = 0.76
+                bull_put_prior = 0.76
+            candidates += [
+                ("iron_condor", iron_condor_prior),
+                ("iron_fly", iron_fly_prior),
+                ("bear_call_spread", bear_call_prior),
+                ("bull_put_spread", bull_put_prior),
+            ]
+
     # ===== best_map：各策略取最高prior =====
     seeded_types = [strategy_type for strategy_type, _ in candidates]
     _family_diag_log(
@@ -1523,6 +1768,59 @@ def compile_intent_to_strategies(
     for s, w in candidates:
         if s not in best_map or w > best_map[s]:
             best_map[s] = w
+
+    if income_bias:
+        if range_bias == "strict_range":
+            for k in ("iron_condor", "iron_fly"):
+                if k in best_map:
+                    best_map[k] = min(1.0, round(best_map[k] * 1.08, 3))
+            for k in ("bear_call_spread", "bull_put_spread"):
+                if k in best_map:
+                    best_map[k] = round(best_map[k] * 0.90, 3)
+        elif range_bias == "weak_bearish_range":
+            if "bear_call_spread" in best_map:
+                best_map["bear_call_spread"] = min(1.0, round(best_map["bear_call_spread"] * 1.04, 3))
+            for k in ("iron_condor", "iron_fly"):
+                if k in best_map:
+                    best_map[k] = round(best_map[k] * 0.98, 3)
+        elif range_bias == "weak_bullish_range":
+            if "bull_put_spread" in best_map:
+                best_map["bull_put_spread"] = min(1.0, round(best_map["bull_put_spread"] * 1.04, 3))
+            for k in ("iron_condor", "iron_fly"):
+                if k in best_map:
+                    best_map[k] = round(best_map[k] * 0.98, 3)
+        else:
+            for k in ("bear_call_spread", "bull_put_spread", "iron_condor", "iron_fly"):
+                if k in best_map:
+                    best_map[k] = min(1.0, round(best_map[k] * 1.08, 3))
+
+        directional_backup = getattr(intent, "prefer_directional_backup", False)
+        for k in ("bull_call_spread", "bear_put_spread", "long_call", "long_put"):
+            if k not in best_map:
+                continue
+            is_directional_backup = (
+                directional_backup
+                and (
+                    (intent.market_view == "bearish" and k in ("bear_put_spread", "long_put"))
+                    or (intent.market_view == "bullish" and k in ("bull_call_spread", "long_call"))
+                )
+            )
+            best_map[k] = round(best_map[k] * (0.86 if is_directional_backup else 0.65), 3)
+
+    if vol_detail_signal["put_rich"]:
+        if "bear_call_spread" in best_map:
+            best_map["bear_call_spread"] = min(1.0, round(best_map["bear_call_spread"] * 1.04, 3))
+        if "bull_put_spread" in best_map:
+            best_map["bull_put_spread"] = round(best_map["bull_put_spread"] * 0.96, 3)
+    if vol_detail_signal["call_flat_down"]:
+        if "bear_call_spread" in best_map:
+            best_map["bear_call_spread"] = min(1.0, round(best_map["bear_call_spread"] * 1.03, 3))
+        if "bull_call_spread" in best_map:
+            best_map["bull_call_spread"] = round(best_map["bull_call_spread"] * 0.96, 3)
+    if vol_detail_signal["call_cheap"]:
+        for k in ("bull_call_spread", "diagonal_call"):
+            if k in best_map:
+                best_map[k] = min(1.0, round(best_map[k] * 1.04, 3))
 
     # ===== call/put_iv_rich 时压低 iron、买方debit spread =====
     if intent.vol_view in ("call_iv_rich", "put_iv_rich"):
@@ -1641,7 +1939,7 @@ def compile_intent_to_strategies(
         best_map.pop(banned, None)
 
     # ===== defined_risk_only 过滤 =====
-    if intent.defined_risk_only:
+    if intent.defined_risk_only or getattr(intent, "ban_naked_short", False):
         for k in ("naked_call", "naked_put"):
             best_map.pop(k, None)
 

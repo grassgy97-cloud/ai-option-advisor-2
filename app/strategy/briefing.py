@@ -1,27 +1,22 @@
 from __future__ import annotations
 
 from collections import defaultdict
-import re
 from typing import Any, Dict, List, Optional
-
-from app.ai.client import DEFAULT_ANTHROPIC_MODEL, get_anthropic_client
-
-_client = get_anthropic_client()
 
 
 _PROFIT_CONDITIONS = {
     "call_calendar": "近月 call IV 回落，同时标的维持小幅波动",
     "put_calendar": "近月 put IV 回落，同时标的维持小幅波动",
-    "diagonal_call": "近月 call IV 回落，同时标的温和上涨",
-    "diagonal_put": "近月 put IV 回落，同时标的温和下跌",
+    "diagonal_call": "近月 call IV 回落，同时标的温和上行",
+    "diagonal_put": "近月 put IV 回落，同时标的温和下行",
     "bear_call_spread": "到期时标的低于 short call 行权价",
     "bull_put_spread": "到期时标的高于 short put 行权价",
     "bull_call_spread": "到期时标的高于 long call 行权价",
     "bear_put_spread": "到期时标的低于 long put 行权价",
     "iron_condor": "到期时标的位于两侧 short strike 之间",
     "iron_fly": "到期时标的接近 ATM strike",
-    "long_call": "标的上涨且 IV 抬升",
-    "long_put": "标的下跌且 IV 抬升",
+    "long_call": "标的上涨并伴随 IV 抬升",
+    "long_put": "标的下跌并伴随 IV 抬升",
     "naked_call": "标的不涨或回落，short call 到期归零更有利",
     "naked_put": "标的不跌或上涨，short put 到期归零更有利",
     "covered_call": "标的横盘或温和上涨，备兑 call 收取权利金",
@@ -30,7 +25,6 @@ _PROFIT_CONDITIONS = {
 _STRONG_RECOMMENDATION_THRESHOLD = 0.80
 _REFERENCE_CANDIDATE_THRESHOLD = 0.60
 _PER_UNDERLYING_DISPLAY_LIMIT = 5
-_INCOMPLETE_ENDINGS = ("(", "（", ":", "：", "、", "-", "—", "，", ",", "/", "…")
 
 
 def _score_tier(score: float) -> str:
@@ -59,7 +53,7 @@ def _build_presentation_summary(items: List[Any]) -> Dict[str, Any]:
             "note": "当前没有可展示的候选策略。",
         }
 
-    top_score = float(items[0].score or 0.0)
+    top_score = float(getattr(items[0], "score", 0.0) or 0.0)
     tier = _score_tier(top_score)
     if tier == "strong_recommendation":
         note = ""
@@ -81,66 +75,6 @@ def _build_presentation_summary(items: List[Any]) -> Dict[str, Any]:
 
 def _safe_round(value: Optional[float], digits: int = 3) -> float:
     return round(float(value or 0.0), digits)
-
-
-def _finalize_narrative_text(text: str) -> str:
-    narrative = (text or "").strip()
-    if not narrative:
-        return narrative
-
-    narrative = re.sub(r"\n{3,}", "\n\n", narrative).strip()
-    lines = narrative.splitlines()
-    if not lines:
-        return narrative
-
-    last_line = lines[-1].rstrip()
-    trailing_numbered_bullet = bool(re.search(r"(?:^|\s)(?:\d+|[一二三四五])[\.\、:]?\s*$", last_line))
-    ends_incomplete = last_line.endswith(_INCOMPLETE_ENDINGS)
-
-    if trailing_numbered_bullet:
-        lines = lines[:-1]
-    elif ends_incomplete:
-        sentence_endings = [last_line.rfind(mark) for mark in ("。", "！", "？", ".", "!", "?", "；", ";")]
-        last_complete_idx = max(sentence_endings)
-        if last_complete_idx >= 0:
-            trimmed_line = last_line[: last_complete_idx + 1].rstrip()
-            lines[-1] = trimmed_line
-        else:
-            trimmed_line = re.sub(r"[\(\)（）:：、,\-/—…\s]+$", "", last_line).strip()
-            if trimmed_line:
-                if trimmed_line[-1] not in "。！？.!?；;":
-                    trimmed_line = f"{trimmed_line}。"
-                lines[-1] = trimmed_line
-            else:
-                lines = lines[:-1]
-
-    narrative = "\n".join(line for line in lines if line.strip()).strip()
-    if narrative and narrative[-1] not in "。！？.!?；;":
-        narrative = f"{narrative} 其余细节可结合表格进一步判断。"
-
-    return narrative.strip()
-
-
-def _count_narrative_sections(text: str) -> int:
-    if not text:
-        return 0
-    patterns = [
-        r"(^|\n)一[、.]",
-        r"(^|\n)二[、.]",
-        r"(^|\n)三[、.]",
-        r"(^|\n)四[、.]",
-        r"(^|\n)五[、.]",
-        r"(^|\n)1\.",
-        r"(^|\n)2\.",
-        r"(^|\n)3\.",
-        r"(^|\n)4\.",
-        r"(^|\n)5\.",
-    ]
-    count = 0
-    for pattern in patterns:
-        if re.search(pattern, text):
-            count += 1
-    return min(count, 5)
 
 
 def _safe_pct_value(value: Any) -> Optional[float]:
@@ -166,6 +100,22 @@ def _extract_iv_percentile_payload(greeks_report: Dict[str, Any], key: str) -> O
     if key == "atm_iv_percentile" and isinstance(iv_report, dict) and "composite_percentile" in iv_report:
         return iv_report
     return None
+
+
+def _fill_missing_iv_percentiles(
+    atm_pct: Optional[float],
+    call_pct: Optional[float],
+    put_pct: Optional[float],
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    if atm_pct is None:
+        side_values = [v for v in (call_pct, put_pct) if v is not None]
+        if side_values:
+            atm_pct = sum(side_values) / len(side_values)
+    if call_pct is None:
+        call_pct = atm_pct
+    if put_pct is None:
+        put_pct = atm_pct
+    return atm_pct, call_pct, put_pct
 
 
 def _infer_iv_focus(strategy_type: str) -> str:
@@ -201,6 +151,7 @@ def _build_strategy_iv_context(strategy: Any, greeks_report: Dict[str, Any]) -> 
     atm_pct = _safe_pct_value((atm_payload or {}).get("composite_percentile"))
     call_pct = _safe_pct_value((call_payload or {}).get("composite_percentile"))
     put_pct = _safe_pct_value((put_payload or {}).get("composite_percentile"))
+    atm_pct, call_pct, put_pct = _fill_missing_iv_percentiles(atm_pct, call_pct, put_pct)
 
     focus = _infer_iv_focus(strategy.strategy_type)
     if focus == "call":
@@ -258,61 +209,46 @@ def _format_hv_text(ctx: Dict[str, Any]) -> str:
 def _format_iv_text(ctx: Dict[str, Any]) -> str:
     atm_iv = ctx.get("atm_iv")
     iv_pct = ctx.get("iv_pct")
-    parts: List[str] = []
-
+    if atm_iv is None and iv_pct is None:
+        return "IV 信息不足"
+    parts = []
     if atm_iv is not None:
         parts.append(f"ATM IV={float(atm_iv):.1%}")
-
     if iv_pct is not None:
-        iv_pct_value = float(iv_pct)
-        if iv_pct_value >= 0.80:
-            level = "隐含波动分位较高"
-        elif iv_pct_value <= 0.20:
-            level = "隐含波动分位较低"
-        else:
-            level = "隐含波动分位中性"
-        parts.append(f"IV分位={iv_pct_value:.0%}（{level}）")
-
-    if not parts:
-        return "IV 信息不足"
-    return "；".join(parts)
+        parts.append(f"IV 分位={float(iv_pct):.0%}")
+    return "，".join(parts)
 
 
 def _format_term_structure_text(ctx: Dict[str, Any]) -> List[str]:
-    lines: List[str] = []
-
-    def describe(label: str, slope: Optional[float]) -> Optional[str]:
-        if slope is None or abs(float(slope)) < 0.01:
-            return None
-        slope_value = float(slope)
-        if slope_value > 0:
-            return f"{label} 期限结构前高后低：近月 IV 高于远月 {slope_value:.3f}"
-        return f"{label} 期限结构后高前低：远月 IV 高于近月 {abs(slope_value):.3f}"
-
-    call_text = describe("call", ctx.get("term_slope_call"))
-    put_text = describe("put", ctx.get("term_slope_put"))
-    if call_text:
-        lines.append(call_text)
-    if put_text:
-        lines.append(put_text)
-    return lines
+    texts: List[str] = []
+    for key, label in (("term_slope_call", "CALL期限斜率"), ("term_slope_put", "PUT期限斜率")):
+        value = ctx.get(key)
+        if value is None:
+            continue
+        value = float(value)
+        if value >= 0.01:
+            texts.append(f"{label}为正，远月 IV 相对更高")
+        elif value <= -0.01:
+            texts.append(f"{label}为负，近月 IV 相对更高")
+        else:
+            texts.append(f"{label}较平坦")
+    return texts
 
 
 def _format_skew_text(ctx: Dict[str, Any]) -> str:
     skew = ctx.get("put_call_skew")
     if skew is None:
         return "skew 信息不足"
-    skew_value = float(skew)
-    if skew_value > 0.005:
-        desc = "put 端 IV 高于 call 端"
-    elif skew_value < -0.005:
-        desc = "call 端 IV 高于 put 端"
-    else:
-        desc = "put/call 两端 IV 大致均衡"
-    return f"put-call skew={skew_value:.3f}，{desc}"
+    skew = float(skew)
+    if skew >= 0.03:
+        return "put-call skew 偏高，下行保护需求更强"
+    if skew <= -0.03:
+        return "put-call skew 偏低，上行期权定价相对更强"
+    return "put-call skew 接近中性"
 
 
-def _build_volatility_context(ctx: Dict[str, Any]) -> Dict[str, Any]:
+def _build_volatility_context(ctx: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    ctx = ctx or {}
     return {
         "historical_volatility_text": _format_hv_text(ctx),
         "implied_volatility_text": _format_iv_text(ctx),
@@ -321,31 +257,63 @@ def _build_volatility_context(ctx: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _get_greeks_report(strategy: Any) -> Dict[str, Any]:
+    metadata = getattr(strategy, "metadata", {}) or {}
+    report = metadata.get("greeks_report", {}) or {}
+    return report if isinstance(report, dict) else {}
+
+
+def _format_leg_value(value: Any, digits: int = 4) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.{digits}f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _format_strategy_legs(strategy: Any) -> str:
+    leg_texts: List[str] = []
+    action_label = {"BUY": "买", "SELL": "卖"}
+
+    for leg in getattr(strategy, "legs", []) or []:
+        action = action_label.get(str(getattr(leg, "action", "")).upper(), str(getattr(leg, "action", "")))
+        option_type = str(getattr(leg, "option_type", "")).upper()
+        strike = _format_leg_value(getattr(leg, "strike", None))
+        expiry = _format_leg_value(getattr(leg, "expiry_date", None))
+        delta = _format_leg_value(getattr(leg, "delta", None), digits=3)
+        mid = _format_leg_value(getattr(leg, "mid", None), digits=4)
+        leg_texts.append(f"{action}{option_type} K={strike} {expiry} Δ={delta} mid={mid}")
+
+    return " / ".join(leg_texts)
+
+
+def _format_execution_guidance(strategy: Any) -> str:
+    guidance = getattr(strategy, "execution_guidance", None) or {}
+    if not isinstance(guidance, dict):
+        return "-"
+    pricing_type = guidance.get("pricing_type")
+    good = guidance.get("good_limit")
+    acceptable = guidance.get("acceptable_limit")
+    chase = guidance.get("do_not_chase_beyond")
+    quality = guidance.get("spread_quality")
+    if good is None or acceptable is None or chase is None:
+        return "-"
+    if pricing_type == "credit":
+        return f"收权利金 good>={good:.4f}, acceptable>={acceptable:.4f}, no chase<{chase:.4f}, {quality}"
+    return f"付权利金 good<={good:.4f}, acceptable<={acceptable:.4f}, no chase>{chase:.4f}, {quality}"
+
+
 def _strategy_to_table_row(
     strategy: Any,
     rank: int,
     group_rank: int,
     within_underlying_rank: int,
 ) -> Dict[str, Any]:
-    metadata = strategy.metadata or {}
-    greeks_report = metadata.get("greeks_report", {}) or {}
-    iv_pct = greeks_report.get("iv_percentile", {}) or {}
-    net_greeks = greeks_report.get("net_greeks", {}) or {}
-    strategy_iv_context = _build_strategy_iv_context(strategy, greeks_report)
-
-    if strategy.net_debit is not None:
-        cost_str = f"付权利金 {strategy.net_debit:.4f}"
-    elif strategy.net_credit is not None:
-        cost_str = f"收权利金 {strategy.net_credit:.4f}"
-    else:
-        cost_str = "-"
-
-    legs_str = " / ".join(
-        f"{'卖' if leg.action == 'SELL' else '买'}"
-        f"{leg.option_type} K={leg.strike} {leg.expiry_date} "
-        f"Δ={round(leg.delta, 2) if leg.delta is not None else '-'} mid={leg.mid}"
-        for leg in strategy.legs
-    )
+    greeks_report = _get_greeks_report(strategy)
+    greeks = greeks_report.get("net_greeks", {}) or {}
+    iv_ctx = _build_strategy_iv_context(strategy, greeks_report)
+    score = float(getattr(strategy, "score", 0.0) or 0.0)
+    legs = getattr(strategy, "legs", []) or []
 
     return {
         "rank": rank,
@@ -353,30 +321,34 @@ def _strategy_to_table_row(
         "within_underlying_rank": within_underlying_rank,
         "underlying": strategy.underlying_id,
         "strategy": strategy.strategy_type,
-        "score": round(float(strategy.score or 0.0), 3),
-        "score_tier": _score_tier(float(strategy.score or 0.0)),
-        "score_tier_label": _score_tier_label(float(strategy.score or 0.0)),
-        "cost": cost_str,
-        "legs": legs_str,
-        "net_delta": _safe_round(net_greeks.get("net_delta"), 3),
-        "net_vega": _safe_round(net_greeks.get("net_vega"), 4),
-        "net_theta": _safe_round(net_greeks.get("net_theta"), 4),
-        "iv_label": iv_pct.get("label", strategy_iv_context.get("atm_iv_label", "-")),
-        "iv_pct": iv_pct.get("composite_percentile", strategy_iv_context.get("atm_iv_pct", "-")),
-        "atm_iv_pct": strategy_iv_context.get("atm_iv_pct"),
-        "call_iv_pct": strategy_iv_context.get("call_iv_pct"),
-        "put_iv_pct": strategy_iv_context.get("put_iv_pct"),
-        "iv_triplet_display": " / ".join(
-            [
-                _pct_display(strategy_iv_context.get("atm_iv_pct")),
-                _pct_display(strategy_iv_context.get("call_iv_pct")),
-                _pct_display(strategy_iv_context.get("put_iv_pct")),
-            ]
+        "score": round(score, 3),
+        "score_tier": _score_tier(score),
+        "score_tier_label": _score_tier_label(score),
+        "cost": (
+            f"收权利金 {strategy.net_credit:.4f}"
+            if getattr(strategy, "net_credit", 0.0)
+            else f"付权利金 {getattr(strategy, 'net_debit', 0.0):.4f}"
         ),
-        "iv_focus_dimension": strategy_iv_context.get("focus_dimension"),
-        "iv_focus_percentile": strategy_iv_context.get("focus_percentile"),
-        "iv_focus_text": strategy_iv_context.get("focus_text"),
-        "iv_skew_comparison_text": strategy_iv_context.get("skew_comparison_text"),
+        "legs": _format_strategy_legs(strategy),
+        "leg_count": len(legs),
+        "execution": _format_execution_guidance(strategy),
+        "net_delta": _safe_round(greeks.get("net_delta")),
+        "net_vega": _safe_round(greeks.get("net_vega")),
+        "net_theta": _safe_round(greeks.get("net_theta")),
+        "iv_label": iv_ctx["atm_iv_label"],
+        "iv_pct": iv_ctx["atm_iv_pct"],
+        "atm_iv_pct": iv_ctx["atm_iv_pct"],
+        "call_iv_pct": iv_ctx["call_iv_pct"],
+        "put_iv_pct": iv_ctx["put_iv_pct"],
+        "iv_triplet_display": (
+            f"{_pct_display(iv_ctx['atm_iv_pct'])} / "
+            f"{_pct_display(iv_ctx['call_iv_pct'])} / "
+            f"{_pct_display(iv_ctx['put_iv_pct'])}"
+        ),
+        "iv_focus_dimension": iv_ctx["focus_dimension"],
+        "iv_focus_percentile": iv_ctx["focus_percentile"],
+        "iv_focus_text": iv_ctx["focus_text"],
+        "iv_skew_comparison_text": iv_ctx["skew_comparison_text"],
         "risk_flags": greeks_report.get("risk_flags", []),
         "profit_condition": _PROFIT_CONDITIONS.get(strategy.strategy_type, "-"),
     }
@@ -386,261 +358,265 @@ def _group_ranked_by_underlying(
     ranked: List[Any],
     per_underlying_limit: int = _PER_UNDERLYING_DISPLAY_LIMIT,
 ) -> List[Dict[str, Any]]:
-    grouped: Dict[str, List[Any]] = defaultdict(list)
+    raw_groups: Dict[str, List[Any]] = defaultdict(list)
     for strategy in ranked:
-        grouped[strategy.underlying_id].append(strategy)
+        raw_groups[str(strategy.underlying_id)].append(strategy)
 
-    groups: List[Dict[str, Any]] = []
-    for underlying_id, items in grouped.items():
-        sorted_items = sorted(items, key=lambda strategy: float(strategy.score or 0.0), reverse=True)
-        kept_items = sorted_items[:per_underlying_limit]
-        omitted_count = max(0, len(sorted_items) - len(kept_items))
-        strong_recommendation_count = sum(
-            1
-            for strategy in kept_items
-            if _score_tier(float(strategy.score or 0.0)) == "strong_recommendation"
-        )
-        groups.append(
+    group_stats: List[Dict[str, Any]] = []
+    for underlying_id, items in raw_groups.items():
+        sorted_items = sorted(items, key=lambda item: float(getattr(item, "score", 0.0) or 0.0), reverse=True)
+        top_score = float(getattr(sorted_items[0], "score", 0.0) or 0.0) if sorted_items else 0.0
+        group_stats.append(
             {
                 "underlying_id": underlying_id,
-                "items": kept_items,
+                "all_items": sorted_items,
+                "display_items": sorted_items[:per_underlying_limit],
                 "candidate_count": len(sorted_items),
-                "display_count": len(kept_items),
-                "omitted_count": omitted_count,
-                "omitted_note": f"另有 {omitted_count} 个候选未展开" if omitted_count > 0 else "",
-                "top_score": round(float(kept_items[0].score), 3) if kept_items else None,
-                "strong_recommendation_count": strong_recommendation_count,
-                "presentation": _build_presentation_summary(kept_items),
+                "top_score": round(top_score, 3),
+                "strong_recommendation_count": sum(
+                    1 for item in sorted_items if float(getattr(item, "score", 0.0) or 0.0) >= _STRONG_RECOMMENDATION_THRESHOLD
+                ),
             }
         )
 
-    groups.sort(
+    group_stats.sort(
         key=lambda group: (
-            -(group["top_score"] if group["top_score"] is not None else -1.0),
+            -group["top_score"],
             -group["strong_recommendation_count"],
             -group["candidate_count"],
             group["underlying_id"],
         )
     )
-    return groups
+
+    for index, group in enumerate(group_stats, start=1):
+        group["group_rank"] = index
+    return group_stats
 
 
 def _build_market_overview(
-    recommendation_groups: List[Dict[str, Any]],
-    market_context: Optional[Dict[str, Any]] = None,
+    grouped: List[Dict[str, Any]],
+    market_context: Optional[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     market_context = market_context or {}
     overview: List[Dict[str, Any]] = []
-    grouped_ids: List[str] = []
+    grouped_by_uid = {group["underlying_id"]: group for group in grouped}
+    ordered_ids = [group["underlying_id"] for group in grouped]
+    for uid in sorted(market_context.keys()):
+        if uid not in grouped_by_uid:
+            ordered_ids.append(uid)
 
-    for group_index, group in enumerate(recommendation_groups, 1):
-        underlying_id = group["underlying_id"]
-        grouped_ids.append(underlying_id)
-        ctx = market_context.get(underlying_id, {}) or {}
-        top_strategy = group["items"][0] if group["items"] else None
+    for index, uid in enumerate(dict.fromkeys(ordered_ids), start=1):
+        group = grouped_by_uid.get(uid)
+        ctx = market_context.get(uid, {}) or {}
         overview.append(
             {
-                "group_rank": group_index,
-                "underlying_id": underlying_id,
-                "top_score": group["top_score"],
-                "strong_recommendation_count": group["strong_recommendation_count"],
-                "candidate_count": group["candidate_count"],
-                "top_strategy_type": top_strategy.strategy_type if top_strategy is not None else None,
-                "presentation": group["presentation"],
-                "market_summary": ctx.get("summary", ""),
+                "group_rank": group.get("group_rank") if group else index,
+                "underlying_id": uid,
+                "top_score": group.get("top_score") if group else None,
+                "candidate_count": group.get("candidate_count") if group else 0,
+                "strong_recommendation_count": group.get("strong_recommendation_count") if group else 0,
+                "top_strategy_type": (
+                    group["all_items"][0].strategy_type
+                    if group and group.get("all_items")
+                    else None
+                ),
+                "market_summary": ctx.get("summary"),
                 "volatility_context": _build_volatility_context(ctx),
             }
         )
-
-    extra_context_ids = sorted(uid for uid in market_context.keys() if uid not in grouped_ids)
-    for offset, underlying_id in enumerate(extra_context_ids, len(overview) + 1):
-        ctx = market_context.get(underlying_id, {}) or {}
-        overview.append(
-            {
-                "group_rank": offset,
-                "underlying_id": underlying_id,
-                "top_score": None,
-                "strong_recommendation_count": 0,
-                "candidate_count": 0,
-                "top_strategy_type": None,
-                "presentation": _build_presentation_summary([]),
-                "market_summary": ctx.get("summary", ""),
-                "volatility_context": _build_volatility_context(ctx),
-            }
-        )
-
     return overview
 
 
-def _build_recommendation_groups(recommendation_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    output: List[Dict[str, Any]] = []
+def _build_recommendation_groups(grouped: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    recommendation_groups: List[Dict[str, Any]] = []
+    for group in grouped:
+        items: List[Dict[str, Any]] = []
+        for within_rank, strategy in enumerate(group["display_items"], start=1):
+            row = _strategy_to_table_row(
+                strategy,
+                rank=0,
+                group_rank=group["group_rank"],
+                within_underlying_rank=within_rank,
+            )
+            row["rank"] = within_rank
+            items.append(row)
 
-    for group_index, group in enumerate(recommendation_groups, 1):
-        items = sorted(group["items"], key=lambda strategy: float(strategy.score or 0.0), reverse=True)
-        output.append(
+        omitted_count = max(0, group["candidate_count"] - len(items))
+        recommendation_groups.append(
             {
-                "group_rank": group_index,
+                "group_rank": group["group_rank"],
                 "underlying_id": group["underlying_id"],
                 "top_score": group["top_score"],
-                "strong_recommendation_count": group["strong_recommendation_count"],
                 "candidate_count": group["candidate_count"],
-                "display_count": group.get("display_count", len(items)),
-                "omitted_count": group.get("omitted_count", 0),
-                "omitted_note": group.get("omitted_note", ""),
-                "presentation": group["presentation"],
-                "items": [
-                    _strategy_to_table_row(
-                        strategy=item,
-                        rank=item_index,
-                        group_rank=group_index,
-                        within_underlying_rank=item_index,
-                    )
-                    for item_index, item in enumerate(items, 1)
-                ],
+                "strong_recommendation_count": group["strong_recommendation_count"],
+                "presentation": _build_presentation_summary(group["display_items"]),
+                "items": items,
+                "omitted_count": omitted_count,
+                "omitted_note": f"另有 {omitted_count} 个候选未展开。" if omitted_count else "",
             }
         )
+    return recommendation_groups
 
-    return output
 
+def _build_cross_underlying_summary(grouped: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not grouped:
+        return {"best_underlying_id": None, "comparison_text": "当前没有足够候选用于跨标的比较。"}
 
-def _build_cross_underlying_summary(recommendation_groups: List[Dict[str, Any]]) -> Dict[str, Any]:
-    if not recommendation_groups:
+    best = grouped[0]
+    if len(grouped) == 1:
         return {
-            "best_underlying_id": None,
-            "comparison_text": "当前没有可比较的跨标的推荐。",
+            "best_underlying_id": best["underlying_id"],
+            "comparison_text": f"当前仅有 {best['underlying_id']} 形成有效候选，优先参考该标的组内排序。",
         }
 
-    best_group = recommendation_groups[0]
-    best_underlying_id = best_group["underlying_id"]
-    best_top = best_group["items"][0] if best_group["items"] else None
-    if best_top is not None and best_group["top_score"] is not None:
-        best_desc = (
-            f"{best_underlying_id} 当前优先级最高，首选为 {best_top.strategy_type}，"
-            f"评分 {best_group['top_score']:.3f}。"
-        )
-    else:
-        best_desc = f"{best_underlying_id} 当前是优先级最高的标的。"
-
-    if len(recommendation_groups) == 1:
-        comparison_text = best_desc
-    else:
-        second_group = recommendation_groups[1]
-        second_top = second_group["items"][0] if second_group["items"] else None
-        if (
-            second_top is not None
-            and second_group["top_score"] is not None
-            and best_group["top_score"] is not None
-        ):
-            gap = round(best_group["top_score"] - second_group["top_score"], 3)
-            comparison_text = (
-                f"{best_desc} 相比之下，{second_group['underlying_id']} 的首选为 "
-                f"{second_top.strategy_type}，评分 {second_group['top_score']:.3f}，"
-                f"与第一组相差 {gap:.3f}。"
-            )
-        else:
-            comparison_text = best_desc
-
+    second = grouped[1]
+    gap = round(float(best["top_score"] or 0.0) - float(second["top_score"] or 0.0), 3)
     return {
-        "best_underlying_id": best_underlying_id,
-        "comparison_text": comparison_text,
+        "best_underlying_id": best["underlying_id"],
+        "comparison_text": (
+            f"{best['underlying_id']} 当前 top_score={best['top_score']}，"
+            f"领先 {second['underlying_id']} 约 {gap:.3f}，可作为优先关注标的。"
+        ),
     }
 
 
-def _flatten_grouped_rows(recommendation_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _flatten_grouped_rows(grouped: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     flat_rows: List[Dict[str, Any]] = []
     rank = 1
-    for group_index, group in enumerate(recommendation_groups, 1):
-        sorted_items = sorted(group["items"], key=lambda strategy: float(strategy.score or 0.0), reverse=True)
-        for within_underlying_rank, strategy in enumerate(sorted_items, 1):
+    for group in grouped:
+        for within_rank, strategy in enumerate(group["display_items"], start=1):
             flat_rows.append(
                 _strategy_to_table_row(
-                    strategy=strategy,
+                    strategy,
                     rank=rank,
-                    group_rank=group_index,
-                    within_underlying_rank=within_underlying_rank,
+                    group_rank=group["group_rank"],
+                    within_underlying_rank=within_rank,
                 )
             )
             rank += 1
     return flat_rows
 
 
-def _build_grouped_narrative_context(
-    intent_text: str,
+def _decision_items(decision_payload: Optional[Dict[str, Any]], key: str) -> List[Dict[str, Any]]:
+    if not decision_payload:
+        return []
+    value = decision_payload.get(key, []) or []
+    return value if isinstance(value, list) else []
+
+
+def _find_table_row(table: List[Dict[str, Any]], item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    uid = str(item.get("underlying_id") or "")
+    strategy_type = str(item.get("strategy_type") or "")
+    for row in table:
+        if str(row.get("underlying")) == uid and str(row.get("strategy")) == strategy_type:
+            return row
+    return None
+
+
+def _format_decision_item(item: Dict[str, Any], row: Optional[Dict[str, Any]] = None) -> str:
+    uid = item.get("underlying_id") or (row or {}).get("underlying") or "-"
+    strategy_type = item.get("strategy_type") or (row or {}).get("strategy") or "-"
+    score = item.get("score")
+    if score is None and row:
+        score = row.get("score")
+    family = item.get("family")
+    score_text = f"，score={float(score):.3f}" if score is not None else ""
+    family_text = f"，family={family}" if family else ""
+    return f"{uid} 的 {strategy_type}{score_text}{family_text}"
+
+
+def _risk_sentence(row: Optional[Dict[str, Any]]) -> str:
+    if not row:
+        return "需要继续关注成交质量、波动率变化和到期前价格路径。"
+    flags = row.get("risk_flags") or []
+    theta = row.get("net_theta")
+    delta = row.get("net_delta")
+    if flags:
+        return f"风险上需关注 {', '.join(str(flag) for flag in flags[:3])}。"
+    if theta is not None and float(theta) < 0:
+        return "该结构 theta 为负，若标的未按预期移动，时间流逝会形成拖累。"
+    return f"主要监控 delta={delta}、theta={theta} 以及成交价差变化。"
+
+
+def _build_deterministic_narrative(
+    table: List[Dict[str, Any]],
     market_overview: List[Dict[str, Any]],
     recommendation_groups: List[Dict[str, Any]],
     cross_underlying_summary: Dict[str, Any],
-    flat_table: List[Dict[str, Any]],
     presentation: Dict[str, Any],
+    decision_payload: Optional[Dict[str, Any]],
 ) -> str:
-    market_context_ids = [item["underlying_id"] for item in market_overview if item.get("underlying_id")]
-    recommendation_group_ids = [group["underlying_id"] for group in recommendation_groups if group.get("underlying_id")]
-    recommendation_group_id_set = set(recommendation_group_ids)
-    context_only_ids = [uid for uid in market_context_ids if uid not in recommendation_group_id_set]
+    if not table and not recommendation_groups:
+        return "当前没有可展示的候选策略，可先结合市场条件等待更清晰的结构机会。"
 
-    ctx_lines = [f"用户输入：{intent_text}"]
-    ctx_lines.append(f"market context underlyings: {market_context_ids}")
-    ctx_lines.append(f"recommendation group underlyings: {recommendation_group_ids}")
-    ctx_lines.append(f"context-only underlyings: {context_only_ids}")
+    primary = _decision_items(decision_payload, "primary_recommendations")
+    secondary = _decision_items(decision_payload, "secondary_recommendations")
+    preferred_uid = (decision_payload or {}).get("preferred_underlying_id") or cross_underlying_summary.get("best_underlying_id")
+    decision_notes = (decision_payload or {}).get("decision_notes", {}) or {}
+    gap = decision_notes.get("cross_underlying_gap")
 
-    if market_overview:
-        ctx_lines.append("\n市场概览：")
-        for item in market_overview:
-            coverage = "recommended" if item["underlying_id"] in recommendation_group_id_set else "context_only"
-            vol_ctx = item.get("volatility_context", {}) or {}
-            ctx_lines.append(
-                f"- {item['group_rank']}. {item['underlying_id']} "
-                f"coverage={coverage} top_score={item['top_score']} "
-                f"candidate_count={item['candidate_count']} top_strategy={item.get('top_strategy_type') or '-'}"
-            )
-            ctx_lines.append(f"  历史波动/Realized：{vol_ctx.get('historical_volatility_text', '历史波动率信息不足')}")
-            ctx_lines.append(f"  隐含波动/IV：{vol_ctx.get('implied_volatility_text', 'IV 信息不足')}")
-            term_texts = vol_ctx.get("term_structure_texts") or []
-            if term_texts:
-                ctx_lines.append(f"  期限结构/Term：{'；'.join(term_texts)}")
-            else:
-                ctx_lines.append("  期限结构/Term：未见强期限结构信号")
-            ctx_lines.append(f"  偏斜/Skew：{vol_ctx.get('skew_text', 'skew 信息不足')}")
-            if item.get("market_summary"):
-                ctx_lines.append(
-                    f"  补充市场摘要（若与结构化波动率信息冲突，以结构化信息为准）：{item['market_summary']}"
-                )
+    primary_item = primary[0] if primary else {}
+    primary_row = _find_table_row(table, primary_item) if primary_item else (table[0] if table else None)
+    if not primary_item and primary_row:
+        primary_item = {
+            "underlying_id": primary_row.get("underlying"),
+            "strategy_type": primary_row.get("strategy"),
+            "score": primary_row.get("score"),
+            "decision_reason": "table_top_rank",
+        }
 
-    if recommendation_groups:
-        ctx_lines.append("\n分组推荐：")
-        for group in recommendation_groups:
-            ctx_lines.append(
-                f"- 标的 {group['underlying_id']}（组内 top={group['top_score']}，"
-                f"层级={group['presentation']['overall_label']}）"
-            )
-            if group.get("omitted_note"):
-                ctx_lines.append(f"  {group['omitted_note']}")
-            for item in group["items"]:
-                ctx_lines.append(
-                    f"  {item['within_underlying_rank']}. {item['strategy']} "
-                    f"score={item['score']} {item['cost']} "
-                    f"IV(ATM/C/P)={item['iv_triplet_display']} "
-                    f"focus={item.get('iv_focus_text', '-')} "
-                    f"delta={item['net_delta']} vega={item['net_vega']} theta={item['net_theta']} "
-                    f"flags={item['risk_flags']}"
-                )
-                if item.get("iv_skew_comparison_text"):
-                    ctx_lines.append(f"    skew_hint={item['iv_skew_comparison_text']}")
+    market_ids = [item.get("underlying_id") for item in market_overview if item.get("underlying_id")]
+    multi_underlying = len(set(market_ids)) > 1 or len(recommendation_groups) > 1
+    top_summary = _format_decision_item(primary_item, primary_row)
+    reason = primary_item.get("decision_reason") or "当前排序和执行质量综合领先"
+    cost = primary_row.get("cost") if primary_row else "-"
+    iv_focus = primary_row.get("iv_focus_text") if primary_row else ""
 
-    if cross_underlying_summary.get("comparison_text"):
-        ctx_lines.append(f"\n跨标的比较：{cross_underlying_summary['comparison_text']}")
+    if multi_underlying:
+        gap_text = f"，领先幅度约 {float(gap):.3f}" if gap is not None else ""
+        market_view = (
+            f"本次覆盖 {', '.join(str(uid) for uid in market_ids)}；"
+            f"当前 preferred_underlying_id 为 {preferred_uid}{gap_text}。"
+        )
+    else:
+        only_uid = preferred_uid or (market_ids[0] if market_ids else (primary_item.get("underlying_id") or "-"))
+        market_view = f"本次主要评估 {only_uid}；当前候选中 {top_summary} 排在最前。"
 
-    if presentation["note"]:
-        ctx_lines.append(f"\n呈现层级：{presentation['note']}")
+    primary_text = (
+        f"首选策略是 {top_summary}，成本结构为 {cost}。"
+        f"其成为当前焦点的原因是 {reason}；{iv_focus or '波动率维度以表格中的 ATM/CALL/PUT 分位为准'}。"
+    )
 
-    if flat_table:
-        ctx_lines.append("\n扁平排序参考：")
-        for row in flat_table:
-            ctx_lines.append(
-                f"{row['rank']}. group={row['group_rank']} {row['underlying']} {row['strategy']} "
-                f"score={row['score']} {row['cost']}"
-            )
+    if secondary:
+        formatted_secondary = []
+        for item in secondary[:3]:
+            formatted_secondary.append(_format_decision_item(item, _find_table_row(table, item)))
+        alt_text = "备选可关注 " + "；".join(formatted_secondary) + "。这些候选适合作为对照或次优选择，不应直接覆盖首选策略。"
+    else:
+        alt_text = "当前没有更强的 secondary recommendation，主要关注首选这一组即可。"
 
-    return "\n".join(ctx_lines)
+    risk_text = _risk_sentence(primary_row)
+    monitor_text = (
+        "后续重点观察标的是否接近关键行权价、IV 分位是否明显跳变、以及买卖价差是否恶化；"
+        "若这些条件转弱，应降低执行优先级。"
+    )
+
+    sections = [
+        f"一、市场判断：{market_view}",
+        f"二、首选策略：{primary_text}",
+        f"三、备选对比：{alt_text}",
+        f"四、风险提示：{risk_text}",
+        f"五、后续关注条件：{monitor_text}",
+    ]
+    if presentation.get("note"):
+        sections.insert(0, presentation["note"])
+    return "\n".join(sections)
+
+
+def _count_narrative_sections(text: str) -> int:
+    if not text:
+        return 0
+    return sum(1 for marker in ("一、", "二、", "三、", "四、", "五、") if marker in text)
 
 
 def build_briefing(
@@ -648,11 +624,9 @@ def build_briefing(
     intent_text: str,
     top_n: int = 5,
     market_context: Optional[Dict[str, Any]] = None,
+    decision_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    生成推荐简报：保留旧字段，同时补充按标的分组的推荐结构。
-    market_context: {uid: ctx_dict}
-    """
+    """Build grouped briefing payload and a deterministic narrative."""
     top = ranked[:top_n]
     presentation = _build_presentation_summary(top)
 
@@ -670,72 +644,14 @@ def build_briefing(
     print(f"[briefing_narrative_check] market_context_ids={market_context_ids}")
     print(f"[briefing_narrative_check] grouped_ids={grouped_ids}")
 
-    ctx = _build_grouped_narrative_context(
-        intent_text=intent_text,
+    narrative = _build_deterministic_narrative(
+        table=table,
         market_overview=market_overview,
         recommendation_groups=recommendation_groups,
         cross_underlying_summary=cross_underlying_summary,
-        flat_table=table,
         presentation=presentation,
+        decision_payload=decision_payload,
     )
-
-    system = """
-你是一个 A 股 ETF 期权交易助手，面向有经验的交易者。请用简洁、专业、克制的中文输出结构化简报，优先使用以下 5 个小节标题：
-一、市场判断
-二、首选策略
-三、备选对比
-四、风险提示
-五、后续关注条件
-
-写作要求：
-1. 若信息足够，按上述 5 个小节输出；每个小节 1-3 句。
-2. 若某一节信息不足，也尽量保留标题并用一句简洁说明，不要省略成单段空泛摘要。
-3. 必须明确说明：
-   - 为什么首选策略当前更优
-   - 至少一个备选为什么更弱或更次优
-   - 至少一个具体风险或监控触发条件
-4. 内容可以比之前更完整，但不要写成长篇大论；以 280-420 字左右为宜。
-5. 不要输出开放式枚举，不要写未完成的编号、括号或半句话。
-6. 每一节都必须用完整句子结束，最后一节也必须自然收束。
-
-波动率表述规则：
-- 历史波动率 / HV / realized volatility 只用于描述近期实际波动大小，例如“历史波动率较高/较低”“近期实际波动更大/更小”
-- 不得把 HV 写成“贵/便宜”或“估值高/低”
-- “贵/便宜”只可用于 IV 或明确的 IV 结构定价语境
-- ATM IV percentile 代表整体隐含波动水平
-- CALL IV percentile 代表上行期权定价是否偏强
-- PUT IV percentile 代表下行期权定价是否偏强
-- 对中性结构优先参考 ATM IV percentile
-- 对 call 侧策略优先参考 CALL IV percentile
-- 对 put 侧策略优先参考 PUT IV percentile
-- 若 PUT IV percentile 明显高于 CALL IV percentile，可简要提示下行保护需求更强或 bearish skew
-- 若 CALL IV percentile 明显高于 PUT IV percentile，可简要提示上行定价更强或 bullish speculation
-- 期限结构只在 term_slope_call / term_slope_put 或明确 IV 结构证据支持时再下结论
-- skew 要单独描述，不要与 HV 混写
-
-多标的模式下：
-- 要提到所有拥有市场背景信息的标的
-- 要明确说明哪个标的当前更优先
-- 要区分“有推荐”和“仅作为市场参考的 context-only 标的”
-- 不要把 context-only 标的表述成“缺少市场数据”
-- 不要把多标的内容压缩成单一标的摘要
-""".strip()
-
-    try:
-        resp = _client.messages.create(
-            model=DEFAULT_ANTHROPIC_MODEL,
-            max_tokens=700,
-            system=system,
-            messages=[{"role": "user", "content": ctx}],
-        )
-        narrative = _finalize_narrative_text(resp.content[0].text)
-    except Exception as e:
-        print(f"[briefing] LLM failed: {e}")
-        narrative = "（简报生成失败）"
-
-    if presentation["note"]:
-        narrative = f"{presentation['note']}\n\n{narrative}" if narrative else presentation["note"]
-    narrative = _finalize_narrative_text(narrative)
     narrative_tail = (narrative or "")[-80:]
     section_count = _count_narrative_sections(narrative)
     print(f"[briefing_text_check] narrative_len={len(narrative or '')}")
@@ -782,7 +698,7 @@ def build_briefing(
                 f"strategy={row.get('strategy')} "
                 f"score={row.get('score')}"
             )
-    except Exception as e:
-        print(f"[briefing_check] logging_failed: {e}")
+    except Exception as exc:
+        print(f"[briefing_check] logging_failed: {exc}")
 
     return briefing

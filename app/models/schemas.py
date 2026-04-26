@@ -117,6 +117,15 @@ class IntentSpec(BaseModel):
     allowed_strategies: Optional[List[StrategyType]] = None
     banned_strategies: List[str] = Field(default_factory=list)
     raw_text: Optional[str] = None
+    require_positive_theta: bool = False
+    prefer_income_family: bool = False
+    ban_naked_short: bool = False
+    prefer_directional_backup: bool = False
+    prefer_neutral_structure: bool = False
+    range_bias: Optional[str] = None
+    market_view_strength: float = 0.5
+    horizon_views: Optional[Dict[str, Any]] = None
+    vol_view_detail: Optional[Dict[str, Any]] = None
 
     # ===== 新增：Greeks意图偏好 =====
     # 格式：{"delta": {"sign": "positive"|"negative"|"neutral", "strength": 0.0-1.0}, ...}
@@ -243,6 +252,91 @@ class ResolvedStrategy(BaseModel):
     score_breakdown: Dict[str, Any] = Field(default_factory=dict)
     rationale: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    execution_guidance: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PositionLegInput(BaseModel):
+    contract_id: Optional[str] = None
+    side: ActionType
+    option_type: OptionType
+    strike: float
+    expiry: str
+    entry_price: Optional[float] = None
+    quantity: int = 1
+
+
+class PositionMonitorRequest(BaseModel):
+    position_id: str
+    underlying_id: str
+    strategy_type: StrategyType
+    opened_at: Optional[str] = None
+    entry_credit_or_debit: Optional[float] = None
+    pricing_type: Optional[Literal["credit", "debit"]] = None
+    quantity: int = 1
+    legs: List[PositionLegInput]
+
+
+class PositionMonitorResponse(BaseModel):
+    position_id: str
+    underlying_id: str
+    strategy_type: StrategyType
+    monitoring_summary: Dict[str, Any]
+    current_legs: List[Dict[str, Any]] = Field(default_factory=list)
+    llm_commentary: Optional[Dict[str, Any]] = None
+    monitoring_llm_commentary: Optional[Dict[str, Any]] = None
+
+
+class PositionLegUpsertRequest(BaseModel):
+    underlying_id: Optional[str] = None
+    contract_id: str
+    option_type: Optional[OptionType] = None
+    strike: Optional[float] = None
+    expiry_date: Optional[str] = None
+    side: ActionType
+    quantity: int
+    avg_entry_price: float
+    strategy_bucket: Optional[str] = None
+    group_id: Optional[str] = None
+    tag: Optional[str] = None
+    include_in_portfolio_greeks: bool = True
+    note: Optional[str] = None
+    fee_rmb: float = 0.0
+    reason: Optional[str] = None
+
+
+class PositionLegRecord(BaseModel):
+    leg_id: int
+    underlying_id: str
+    contract_id: str
+    option_type: str
+    strike: float
+    expiry_date: str
+    side: str
+    quantity: int
+    avg_entry_price: float
+    strategy_bucket: Optional[str] = None
+    group_id: Optional[str] = None
+    tag: Optional[str] = None
+    include_in_portfolio_greeks: bool = True
+    status: str
+    opened_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    note: Optional[str] = None
+
+
+class PositionLegUpsertResponse(BaseModel):
+    leg: PositionLegRecord
+    trade: Dict[str, Any]
+
+
+class UnderlyingMonitorResponse(BaseModel):
+    underlying_id: str
+    monitoring_summary: Dict[str, Any]
+    monitored_legs: List[Dict[str, Any]] = Field(default_factory=list)
+    risk_contributors: List[Dict[str, Any]] = Field(default_factory=list)
+    hedge_suggestions: List[Dict[str, Any]] = Field(default_factory=list)
+    llm_commentary: Optional[Dict[str, Any]] = None
+    monitoring_llm_commentary: Optional[Dict[str, Any]] = None
 
 
 class ScanCandidate(BaseModel):
@@ -286,4 +380,6 @@ class AdvisorRunResponse(BaseModel):
     resolved_candidates: List[ResolvedStrategy]
     backtest_result: Dict[str, Any] = Field(default_factory=dict)
     calendar_recommendations: List[CalendarRecommendation] = Field(default_factory=list)
+    decision_payload: Optional[Dict[str, Any]] = None
     briefing: Optional[Dict[str, Any]] = None
+    briefing_llm_commentary: Optional[Dict[str, Any]] = None

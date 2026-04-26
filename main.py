@@ -3,6 +3,9 @@ from fastapi.responses import HTMLResponse
 
 from app.api.advisor_v2 import router as advisor_router
 from app.api.covered_call_api import router as covered_call_router
+from app.api.debug import router as debug_router
+from app.api.monitor import router as monitor_router
+from app.api.positions import router as positions_router
 from app.api.scanner_v2 import router as scanner_router
 
 app = FastAPI(title="AI Option Advisor")
@@ -10,6 +13,9 @@ app = FastAPI(title="AI Option Advisor")
 app.include_router(advisor_router)
 app.include_router(scanner_router)
 app.include_router(covered_call_router)
+app.include_router(monitor_router)
+app.include_router(positions_router)
+app.include_router(debug_router)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -336,8 +342,103 @@ HTML_PAGE = """<!DOCTYPE html>
     .button-col {
       flex-direction: row;
       flex-wrap: wrap;
-    }
   }
+}
+
+.positions-section {
+  margin-top: 28px;
+  padding: 18px;
+  border: 1px solid #d8e1ef;
+  border-radius: 14px;
+  background: #fbfdff;
+}
+.positions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.positions-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.positions-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.positions-table th,
+.positions-table td {
+  padding: 8px;
+  border-bottom: 1px solid #e5edf7;
+  vertical-align: top;
+}
+.position-form-panel {
+  display: none;
+  margin: 12px 0;
+  padding: 14px;
+  border: 1px solid #d8e1ef;
+  border-radius: 12px;
+  background: #ffffff;
+}
+.position-form-panel.visible {
+  display: block;
+}
+.position-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+.position-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #41546d;
+}
+.position-grid input,
+.position-grid select {
+  padding: 8px;
+  border: 1px solid #cbd7e6;
+  border-radius: 8px;
+}
+.monitor-box,
+.position-monitor {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #111;
+  border: 1px solid #343a46;
+  color: #e6e6e6;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  font-size: 13px;
+}
+.alert { color: #ff4d4f; }
+.watch { color: #faad14; }
+.normal { color: #52c41a; }
+.contract-meta-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.contract-meta-tools input {
+  flex: 1 1 170px;
+}
+.contract-meta-status {
+  min-height: 16px;
+  color: #41546d;
+  font-size: 12px;
+}
+.contract-meta-status.error {
+  color: #a33a2a;
+}
+.contract-meta-status.ok {
+  color: #236b3a;
+}
 </style>
 </head>
 <body>
@@ -349,12 +450,12 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="panel-title">
       <span>选择标的</span>
       <span>
-        <button type="button" onclick="selectAll()">全选</button>
+        <button id="btn-select-all" type="button">全选</button>
         /
-        <button type="button" onclick="clearAll()">清空</button>
+        <button id="btn-clear-all" type="button">清空</button>
       </span>
     </div>
-    <label><input type="checkbox" value="ALL" id="chk-ALL" onchange="toggleAll(this)"> 全部扫描</label>
+    <label><input type="checkbox" value="ALL" id="chk-ALL"> 全部扫描</label>
     <hr class="divider">
     <label><input type="checkbox" value="510300" checked> 510300 沪深300</label>
     <label><input type="checkbox" value="510050"> 510050 上证50</label>
@@ -378,8 +479,8 @@ IV 偏高，想收 theta；
   </div>
 
   <div class="button-col">
-    <button id="btn" type="button" onclick="runAdvisor()">分析</button>
-    <button id="btn-covered" type="button" onclick="runCoveredCall()">备兑扫描</button>
+    <button id="btn" type="button">分析</button>
+    <button id="btn-covered" type="button">备兑扫描</button>
   </div>
 </div>
 
@@ -427,12 +528,12 @@ IV 偏高，想收 theta；
 </div>
 
 <div class="shortcuts">
-  <span class="shortcut" onclick="setShortcut('近月认购偏贵，想做低风险跨期组合')">近月认购偏贵</span>
-  <span class="shortcut" onclick="setShortcut('我觉得 300 近期会涨，想做方向性策略')">看多方向</span>
-  <span class="shortcut" onclick="setShortcut('我持有 300ETF 现货，想做备兑增强')">备兑增收</span>
-  <span class="shortcut" onclick="setShortcut('整体波动率偏高，想收 theta')">IV 偏高卖方</span>
-  <span class="shortcut" onclick="setShortcut('双向波动可能变大，但下行空间更多，下方 8% 有支撑')">非对称波动</span>
-  <span class="shortcut" onclick="setShortcut('偏空，下行空间大，上方 5% 有压力')">偏空压力位</span>
+  <span class="shortcut" data-shortcut="近月认购偏贵，想做低风险跨期组合">近月认购偏贵</span>
+  <span class="shortcut" data-shortcut="我觉得 300 近期会涨，想做方向性策略">看多方向</span>
+  <span class="shortcut" data-shortcut="我持有 300ETF 现货，想做备兑增强">备兑增收</span>
+  <span class="shortcut" data-shortcut="整体波动率偏高，想收 theta">IV 偏高卖方</span>
+  <span class="shortcut" data-shortcut="双向波动可能变大，但下行空间更多，下方 8% 有支撑">非对称波动</span>
+  <span class="shortcut" data-shortcut="偏空，下行空间大，上方 5% 有压力">偏空压力位</span>
 </div>
 
 <div id="status"></div>
@@ -460,11 +561,89 @@ IV 偏高，想收 theta；
   </table>
 </div>
 
+<section class="positions-section">
+  <div class="positions-header">
+    <div>
+      <h2>持仓管理</h2>
+      <div class="textarea-hint">手动录入当前持仓腿；covered_call 或不计入组合 Greeks 的腿仍会显示，但不会进入标的聚合监控。</div>
+    </div>
+    <div class="positions-actions">
+      <button id="btn-position-new" type="button">新增持仓腿</button>
+      <button id="btn-position-refresh" type="button">刷新持仓</button>
+    </div>
+  </div>
+
+  <div id="position-form-panel" class="position-form-panel">
+    <input id="pos-leg-id" type="hidden">
+    <div class="position-grid">
+      <label>underlying_id<input id="pos-underlying-id" value="510300"></label>
+      <label>contract_id
+        <div class="contract-meta-tools">
+          <input id="pos-contract-id">
+          <button id="btn-contract-meta" type="button">自动读取</button>
+        </div>
+        <span id="contract-meta-status" class="contract-meta-status"></span>
+      </label>
+      <label>option_type
+        <select id="pos-option-type">
+          <option value="CALL">CALL</option>
+          <option value="PUT">PUT</option>
+        </select>
+      </label>
+      <label>strike<input id="pos-strike" type="number" step="0.0001"></label>
+      <label>expiry_date<input id="pos-expiry-date" type="date"></label>
+      <label>side
+        <select id="pos-side">
+          <option value="BUY">BUY</option>
+          <option value="SELL">SELL</option>
+        </select>
+      </label>
+      <label>quantity<input id="pos-quantity" type="number" min="0" step="1" value="1"></label>
+      <label>avg_entry_price<input id="pos-avg-entry-price" type="number" step="0.0001"></label>
+      <label>strategy_bucket<input id="pos-strategy-bucket" placeholder="bear_call_spread / covered_call"></label>
+      <label>group_id<input id="pos-group-id"></label>
+      <label>tag<input id="pos-tag"></label>
+      <label>fee_rmb<input id="pos-fee-rmb" type="number" step="0.01" value="0"></label>
+      <label>include_in_portfolio_greeks
+        <select id="pos-include-greeks">
+          <option value="true">true</option>
+          <option value="false">false</option>
+        </select>
+      </label>
+      <label>note<input id="pos-note"></label>
+    </div>
+    <div class="positions-actions" style="margin-top:12px">
+      <button id="btn-position-save" type="button">保存</button>
+      <button id="btn-position-cancel" type="button">取消</button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="positions-table">
+      <thead>
+        <tr>
+          <th>标的</th>
+          <th>合约</th>
+          <th>方向</th>
+          <th>数量/均价</th>
+          <th>分组</th>
+          <th>Greeks计入</th>
+          <th>状态</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="positions-body"></tbody>
+    </table>
+  </div>
+  <div id="position-monitor-result" class="monitor-box" style="display:none"></div>
+</section>
+
 <script>
 let coveredCallMode = false;
+let positionRows = [];
 
 function escapeHtml(value) {
-  return String(value ?? '')
+  return String(value !== undefined && value !== null ? value : '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -718,9 +897,21 @@ function renderResult(data) {
   }
 
   const narrativeEl = document.getElementById('narrative');
+  const llmCommentary = briefing.llm_commentary || data.briefing_llm_commentary || {};
   if (briefing.narrative) {
     narrativeEl.style.display = 'block';
-    narrativeEl.textContent = briefing.narrative;
+    let llmText = '';
+    if (llmCommentary.available) {
+      llmText = [
+          '',
+          'LLM解读：' + (llmCommentary.text || llmCommentary.summary || '-'),
+          '首选理由：' + (llmCommentary.why_primary || '-'),
+          '关注点：' + ((llmCommentary.what_to_watch || []).join(' / ') || '-'),
+        ].join('\\n');
+    } else if (llmCommentary.error) {
+      llmText = ['', 'LLM解读暂不可用'].join('\\n');
+    }
+    narrativeEl.textContent = briefing.narrative + llmText;
   }
 
   const rows = briefing.table || [];
@@ -830,14 +1021,408 @@ function renderCoveredCallResult(data) {
   document.getElementById('result-table').style.display = 'table';
 }
 
-document.getElementById('text').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    runAdvisor();
-  }
-});
+function positionPayloadFromForm() {
+  const optionalNumber = function(id) {
+    const el = document.getElementById(id);
+    if (!el || el.value === '') return null;
+    return Number(el.value);
+  };
+  return {
+    underlying_id: document.getElementById('pos-underlying-id').value.trim(),
+    contract_id: document.getElementById('pos-contract-id').value.trim(),
+    option_type: document.getElementById('pos-option-type').value,
+    strike: optionalNumber('pos-strike'),
+    expiry_date: document.getElementById('pos-expiry-date').value,
+    side: document.getElementById('pos-side').value,
+    quantity: Number(document.getElementById('pos-quantity').value || 0),
+    avg_entry_price: Number(document.getElementById('pos-avg-entry-price').value || 0),
+    strategy_bucket: document.getElementById('pos-strategy-bucket').value.trim() || null,
+    group_id: document.getElementById('pos-group-id').value.trim() || null,
+    tag: document.getElementById('pos-tag').value.trim() || null,
+    include_in_portfolio_greeks: document.getElementById('pos-include-greeks').value === 'true',
+    note: document.getElementById('pos-note').value.trim() || null,
+    fee_rmb: Number(document.getElementById('pos-fee-rmb').value || 0),
+    reason: 'manual_frontend_upsert',
+  };
+}
 
-setCoveredCallMode(isExplicitCoveredCallMode());
+function openPositionForm(row) {
+  row = row || {};
+  const panel = document.getElementById('position-form-panel');
+  if (!panel) {
+    console.error('[positions] position form panel not found');
+    return;
+  }
+  panel.classList.add('visible');
+  panel.style.display = 'block';
+  document.getElementById('pos-leg-id').value = row.leg_id || '';
+  document.getElementById('pos-underlying-id').value = row.underlying_id || '510300';
+  document.getElementById('pos-contract-id').value = row.contract_id || '';
+  document.getElementById('pos-option-type').value = row.option_type || 'CALL';
+  document.getElementById('pos-strike').value = row.strike !== undefined && row.strike !== null ? row.strike : '';
+  document.getElementById('pos-expiry-date').value = row.expiry_date || '';
+  document.getElementById('pos-side').value = row.side || 'SELL';
+  document.getElementById('pos-quantity').value = row.quantity !== undefined && row.quantity !== null ? row.quantity : 1;
+  document.getElementById('pos-avg-entry-price').value = row.avg_entry_price !== undefined && row.avg_entry_price !== null ? row.avg_entry_price : '';
+  document.getElementById('pos-strategy-bucket').value = row.strategy_bucket || '';
+  document.getElementById('pos-group-id').value = row.group_id || '';
+  document.getElementById('pos-tag').value = row.tag || '';
+  document.getElementById('pos-include-greeks').value = String(row.include_in_portfolio_greeks !== undefined && row.include_in_portfolio_greeks !== null ? row.include_in_portfolio_greeks : true);
+  document.getElementById('pos-note').value = row.note || '';
+  document.getElementById('pos-fee-rmb').value = 0;
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closePositionForm() {
+  const panel = document.getElementById('position-form-panel');
+  if (!panel) return;
+  panel.classList.remove('visible');
+  panel.style.display = 'none';
+}
+
+function setContractMetaStatus(message, kind) {
+  const status = document.getElementById('contract-meta-status');
+  if (!status) return;
+  status.textContent = message || '';
+  status.className = 'contract-meta-status' + (kind ? ' ' + kind : '');
+}
+
+async function loadContractMetaFromForm() {
+  const input = document.getElementById('pos-contract-id');
+  if (!input) return;
+  const contractId = input.value.trim();
+  if (!contractId) {
+    setContractMetaStatus('请先输入 contract_id', 'error');
+    return;
+  }
+
+  setContractMetaStatus('读取合约信息中...', '');
+  try {
+    const resp = await fetch('/positions/enrich?contract_id=' + encodeURIComponent(contractId));
+    if (!resp.ok) {
+      setContractMetaStatus('未找到该 contract_id，可继续手动填写', 'error');
+      return;
+    }
+    const raw = await resp.json();
+    const data = raw.data || {};
+    document.getElementById('pos-underlying-id').value = data.underlying_id || '';
+    document.getElementById('pos-option-type').value = data.option_type || 'CALL';
+    document.getElementById('pos-strike').value = data.strike !== undefined && data.strike !== null ? data.strike : '';
+    document.getElementById('pos-expiry-date').value = data.expiry_date || '';
+    setContractMetaStatus('已自动填充合约信息', 'ok');
+  } catch (e) {
+    console.error('[positions] contract meta load failed', e);
+    setContractMetaStatus('读取失败：' + (e.message || e), 'error');
+  }
+}
+
+async function savePositionLeg() {
+  const payload = positionPayloadFromForm();
+  if (!payload.contract_id) {
+    alert('请至少填写 contract_id；underlying_id / option_type / strike / expiry_date 可自动补全。');
+    return;
+  }
+  const resp = await fetch('/positions/upsert-leg', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    alert('保存失败：' + text);
+    return;
+  }
+  closePositionForm();
+  await loadPositions();
+}
+
+async function loadPositions() {
+  const tbody = document.getElementById('positions-body');
+  if (!tbody) return;
+  try {
+    const resp = await fetch('/positions/legs?status=OPEN');
+    if (!resp.ok) {
+      tbody.innerHTML = '<tr><td colspan="8">持仓读取失败</td></tr>';
+      return;
+    }
+    const raw = await resp.json();
+    positionRows = raw.data || [];
+    renderPositions(positionRows);
+  } catch (e) {
+    console.error('[positions] load failed', e);
+    tbody.innerHTML = '<tr><td colspan="8">持仓读取失败：' + escapeHtml(e.message || e) + '</td></tr>';
+  }
+}
+
+function renderPositions(rows) {
+  const tbody = document.getElementById('positions-body');
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8">暂无 OPEN 持仓腿</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function(row) {
+    const legId = Number(row.leg_id);
+    return [
+      '<tr>',
+      '<td>' + escapeHtml(row.underlying_id) + '</td>',
+      '<td>' + escapeHtml(row.contract_id) + '<br>' +
+        escapeHtml(row.option_type) + ' K=' + escapeHtml(row.strike) + ' ' + escapeHtml(row.expiry_date) + '</td>',
+      '<td>' + escapeHtml(row.side) + '</td>',
+      '<td>' + escapeHtml(row.quantity) + ' @ ' + escapeHtml(row.avg_entry_price) + '</td>',
+      '<td>' + escapeHtml(row.strategy_bucket || '-') + '<br>group=' +
+        escapeHtml(row.group_id || '-') + ' tag=' + escapeHtml(row.tag || '-') + '</td>',
+      '<td>' + (row.include_in_portfolio_greeks ? '是' : '否') + '</td>',
+      '<td>' + escapeHtml(row.status) + '</td>',
+      '<td>',
+      '<button type="button" data-position-action="edit" data-leg-id="' + legId + '">编辑</button> ',
+      '<button type="button" data-position-action="delete" data-leg-id="' + legId + '">删除</button> ',
+      '<button type="button" data-position-action="monitor" data-underlying-id="' + escapeHtml(row.underlying_id) + '">监控标的</button>',
+      '</td>',
+      '</tr>',
+    ].join('');
+  }).join('');
+}
+
+function editPositionLeg(legId) {
+  let row = null;
+  for (let i = 0; i < positionRows.length; i += 1) {
+    if (Number(positionRows[i].leg_id) === Number(legId)) {
+      row = positionRows[i];
+      break;
+    }
+  }
+  if (row) openPositionForm(row);
+}
+
+window.openPositionForm = openPositionForm;
+window.closePositionForm = closePositionForm;
+window.editPositionLeg = editPositionLeg;
+window.deletePositionLeg = deletePositionLeg;
+window.monitorUnderlying = monitorUnderlying;
+window.loadPositions = loadPositions;
+window.savePositionLeg = savePositionLeg;
+window.loadContractMetaFromForm = loadContractMetaFromForm;
+
+async function deletePositionLeg(legId) {
+  if (!confirm('删除仅用于误录清理，不代表正常交易平仓。确认删除？')) return;
+  try {
+    const resp = await fetch('/positions/legs/' + encodeURIComponent(legId), { method: 'DELETE' });
+    if (!resp.ok) {
+      alert('删除失败：' + await resp.text());
+      return;
+    }
+    await loadPositions();
+  } catch (e) {
+    console.error('[positions] delete failed', e);
+    alert('删除失败：' + (e.message || e));
+  }
+}
+
+async function monitorUnderlying(underlyingId) {
+  const box = document.getElementById('position-monitor-result');
+  if (!box) return;
+  box.style.display = 'block';
+  box.className = 'monitor-box';
+  box.textContent = '监控 ' + underlyingId + ' 中...';
+  try {
+    const resp = await fetch('/monitor/underlying/' + encodeURIComponent(underlyingId));
+    if (!resp.ok) {
+      box.textContent = '监控失败：' + await resp.text();
+      return;
+    }
+    const raw = await resp.json();
+    const data = raw.data || {};
+    const summary = data.monitoring_summary || {};
+    const statusClass = summary.status === 'alert' ? 'alert' : summary.status === 'watch' ? 'watch' : 'normal';
+    box.className = 'monitor-box ' + statusClass;
+    const contributors = data.risk_contributors || [];
+    const hedges = data.hedge_suggestions || [];
+    const llm = data.llm_commentary || data.monitoring_llm_commentary || summary.llm_commentary || {};
+    const commentaryLines = llm.available ? [
+      'LLM解读: ' + (llm.text || llm.summary || '-'),
+      '风险解释: ' + (llm.risk_explanation || '-'),
+      '行动建议: ' + ((llm.actionable_suggestions || []).join(' / ') || '-'),
+    ] : [];
+    const valueOrDash = function(value) {
+      return value !== undefined && value !== null ? value : '-';
+    };
+    box.textContent = [
+      '标的: ' + (data.underlying_id || '-'),
+      '状态: ' + (summary.status || '-') + ' / 建议: ' + (summary.recommended_action || '-'),
+      'Spot: ' + valueOrDash(summary.spot) + ' / PnL: ' + valueOrDash(summary.pnl_estimate) + ' RMB / DTE: ' + valueOrDash(summary.dte),
+      'Greeks: Δ=' + valueOrDash(summary.net_delta) + ' Γ=' + valueOrDash(summary.net_gamma) + ' Θ=' + valueOrDash(summary.net_theta) + ' V=' + valueOrDash(summary.net_vega),
+      'Risk flags: ' + ((summary.risk_flags || []).join(', ') || '-'),
+      '主要风险腿: ' + (contributors.length ? contributors.map(function(c) {
+        return c.leg_id + ':' + c.reason + ':' + c.suggested_action;
+      }).join(' / ') : '-'),
+      '对冲提示: ' + (hedges.length ? hedges.map(function(h) {
+        return h.goal + ': ' + h.suggestion;
+      }).join(' / ') : '-'),
+      '备注: ' + ((summary.notes || []).join(' / ') || '-'),
+    ].concat(commentaryLines).join('\\n');
+  } catch (e) {
+    console.error('[positions] monitor failed', e);
+    box.textContent = '监控失败：' + (e.message || e);
+  }
+}
+
+window.runAdvisor = runAdvisor;
+window.runCoveredCall = runCoveredCall;
+window.setShortcut = setShortcut;
+window.toggleAll = toggleAll;
+window.selectAll = selectAll;
+window.clearAll = clearAll;
+
+function safeInit(name, fn) {
+  try {
+    fn();
+  } catch (e) {
+    console.error('[init] ' + name + ' failed', e);
+  }
+}
+
+function initAdvisorInteractions() {
+  const analyzeButton = document.getElementById('btn');
+  if (analyzeButton) {
+    analyzeButton.addEventListener('click', function() {
+      runAdvisor();
+    });
+  }
+
+  const coveredButton = document.getElementById('btn-covered');
+  if (coveredButton) {
+    coveredButton.addEventListener('click', function() {
+      runCoveredCall();
+    });
+  }
+
+  const selectAllButton = document.getElementById('btn-select-all');
+  if (selectAllButton) {
+    selectAllButton.addEventListener('click', function() {
+      selectAll();
+    });
+  }
+
+  const clearAllButton = document.getElementById('btn-clear-all');
+  if (clearAllButton) {
+    clearAllButton.addEventListener('click', function() {
+      clearAll();
+    });
+  }
+
+  const allCheckbox = document.getElementById('chk-ALL');
+  if (allCheckbox) {
+    allCheckbox.addEventListener('change', function() {
+      toggleAll(allCheckbox);
+    });
+  }
+
+  document.querySelectorAll('[data-shortcut]').forEach(function(item) {
+    item.addEventListener('click', function() {
+      setShortcut(item.getAttribute('data-shortcut') || '');
+    });
+  });
+
+  const textEl = document.getElementById('text');
+  if (textEl) {
+    textEl.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        runAdvisor();
+      }
+    });
+  }
+  setCoveredCallMode(isExplicitCoveredCallMode());
+}
+
+function initPositionInteractions() {
+  const positionNewButton = document.getElementById('btn-position-new');
+  if (positionNewButton) {
+    positionNewButton.addEventListener('click', function() {
+      openPositionForm();
+    });
+  }
+
+  const contractMetaButton = document.getElementById('btn-contract-meta');
+  if (contractMetaButton) {
+    contractMetaButton.addEventListener('click', function() {
+      loadContractMetaFromForm();
+    });
+  }
+
+  const contractInput = document.getElementById('pos-contract-id');
+  if (contractInput) {
+    contractInput.addEventListener('blur', function() {
+      if (contractInput.value.trim()) {
+        loadContractMetaFromForm();
+      }
+    });
+  }
+
+  const positionRefreshButton = document.getElementById('btn-position-refresh');
+  if (positionRefreshButton) {
+    positionRefreshButton.addEventListener('click', function() {
+      loadPositions();
+    });
+  }
+
+  const positionSaveButton = document.getElementById('btn-position-save');
+  if (positionSaveButton) {
+    positionSaveButton.addEventListener('click', function() {
+      savePositionLeg();
+    });
+  }
+
+  const positionCancelButton = document.getElementById('btn-position-cancel');
+  if (positionCancelButton) {
+    positionCancelButton.addEventListener('click', function() {
+      closePositionForm();
+    });
+  }
+
+  const positionsBody = document.getElementById('positions-body');
+  if (positionsBody) {
+    positionsBody.addEventListener('click', function(e) {
+      const target = e.target;
+      if (!target || !target.getAttribute) return;
+      const action = target.getAttribute('data-position-action');
+      if (!action) return;
+      const legId = target.getAttribute('data-leg-id');
+      const underlyingId = target.getAttribute('data-underlying-id');
+      if (action === 'edit') {
+        editPositionLeg(legId);
+      } else if (action === 'delete') {
+        deletePositionLeg(legId);
+      } else if (action === 'monitor') {
+        monitorUnderlying(underlyingId);
+      }
+    });
+  }
+
+  loadPositions().catch(function(e) {
+    console.error('[positions] initial load failed', e);
+  });
+}
+
+function initAdvisor() {
+  initAdvisorInteractions();
+}
+
+function initPositions() {
+  initPositionInteractions();
+}
+
+function initPage() {
+  safeInit('advisor', initAdvisor);
+  safeInit('positions', initPositions);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initPage);
+} else {
+  initPage();
+}
 </script>
 </body>
 </html>

@@ -67,6 +67,30 @@ _SHORT_PREMIUM_STRATEGIES = {
     "iron_condor",
     "iron_fly",
 }
+_DEFINED_RISK_INCOME_STRATEGIES = {
+    "bear_call_spread",
+    "bull_put_spread",
+    "iron_condor",
+    "iron_fly",
+}
+_DIRECTIONAL_DEBIT_STRATEGIES = {
+    "bull_call_spread",
+    "bear_put_spread",
+    "long_call",
+    "long_put",
+}
+_NAKED_SHORT_STRATEGIES = {
+    "naked_call",
+    "naked_put",
+}
+_RANGE_INCOME_STRATEGIES = {
+    "iron_condor",
+    "iron_fly",
+}
+_SINGLE_SIDE_CREDIT_STRATEGIES = {
+    "bear_call_spread",
+    "bull_put_spread",
+}
 
 
 def _avg_rel_spread(strategy: ResolvedStrategy) -> float:
@@ -356,6 +380,171 @@ def _extract_greeks_preference(strategy: ResolvedStrategy) -> Dict[str, Any]:
     return {}
 
 
+def _extract_intent_constraints(strategy: ResolvedStrategy) -> Dict[str, Any]:
+    if not strategy.metadata:
+        return {}
+    constraints = strategy.metadata.get("intent_constraints")
+    if isinstance(constraints, dict):
+        return constraints
+    sm = strategy.metadata.get("strategy_metadata") or {}
+    constraints = sm.get("intent_constraints")
+    if isinstance(constraints, dict):
+        return constraints
+    return {}
+
+
+def _calc_semantic_intent_adj(
+    strategy: ResolvedStrategy,
+    constraints: Dict[str, Any],
+    net_greeks: Dict[str, Any],
+) -> float:
+    if not constraints:
+        return 1.0
+
+    st = strategy.strategy_type
+    adj = 1.0
+    net_theta = net_greeks.get("net_theta")
+    net_delta = net_greeks.get("net_delta")
+    income_bias = bool(constraints.get("require_positive_theta") or constraints.get("prefer_income_family"))
+    ban_naked = bool(constraints.get("ban_naked_short") or constraints.get("defined_risk_only"))
+    directional_backup = bool(constraints.get("prefer_directional_backup"))
+    range_bias = constraints.get("range_bias")
+    neutral_income = bool(
+        income_bias
+        and range_bias in ("strict_range", "weak_bearish_range", "weak_bullish_range")
+    )
+
+    if ban_naked and st in _NAKED_SHORT_STRATEGIES:
+        adj *= 0.55
+
+    if income_bias:
+        if st in _DEFINED_RISK_INCOME_STRATEGIES:
+            adj *= 1.08 if (net_theta is not None and net_theta > 0) else 1.03
+        elif st in _DIRECTIONAL_DEBIT_STRATEGIES:
+            adj *= 0.92 if directional_backup else 0.78
+            if net_theta is not None and net_theta < 0:
+                adj *= 0.94
+
+    if neutral_income:
+        abs_delta = abs(float(net_delta or 0.0))
+        if range_bias == "strict_range" and st in _RANGE_INCOME_STRATEGIES:
+            if abs_delta <= 0.12:
+                adj = max(adj, 1.10)
+            elif abs_delta <= 0.20:
+                adj = max(adj, 1.08)
+            else:
+                adj = max(adj, 1.06)
+        elif range_bias == "strict_range" and st in _SINGLE_SIDE_CREDIT_STRATEGIES:
+            adj = min(adj, 0.82 if abs_delta > 0.12 else 0.90)
+        elif range_bias == "weak_bearish_range":
+            if st == "bear_call_spread":
+                adj = min(1.10, max(adj, 1.04) * 1.02)
+            elif st in _RANGE_INCOME_STRATEGIES:
+                adj = min(adj, 1.02)
+            elif st == "bull_put_spread":
+                adj = min(adj, 0.94)
+        elif range_bias == "weak_bullish_range":
+            if st == "bull_put_spread":
+                adj = min(1.10, max(adj, 1.04) * 1.02)
+            elif st in _RANGE_INCOME_STRATEGIES:
+                adj = min(adj, 1.02)
+            elif st == "bear_call_spread":
+                adj = min(adj, 0.94)
+
+    return round(max(0.70, min(1.10, adj)), 4)
+
+
+def _calc_horizon_alignment_adj(
+    strategy: ResolvedStrategy,
+    constraints: Dict[str, Any],
+) -> float:
+    horizon_views = constraints.get("horizon_views") if isinstance(constraints, dict) else None
+    if not isinstance(horizon_views, dict):
+        return 1.0
+
+    st = strategy.strategy_type
+    if st not in ("call_calendar", "put_calendar", "diagonal_call", "diagonal_put"):
+        return 1.0
+
+    short = horizon_views.get("short_term") if isinstance(horizon_views.get("short_term"), dict) else {}
+    medium = horizon_views.get("medium_term") if isinstance(horizon_views.get("medium_term"), dict) else {}
+    short_direction = short.get("direction", "unknown")
+    medium_direction = medium.get("direction", "unknown")
+    short_vol = short.get("vol_bias", "unknown")
+    medium_vol = medium.get("vol_bias", "unknown")
+
+    direction_divergence = short_direction in ("bearish", "bullish") and medium_direction in ("neutral", "unknown")
+    vol_term_signal = short_vol == "up" and medium_vol in ("down", "flat", "unknown")
+    if not direction_divergence and not vol_term_signal:
+        return 1.0
+
+    adj = 1.0
+    if vol_term_signal:
+        adj *= 1.05 if st in ("call_calendar", "put_calendar") else 1.03
+
+    if direction_divergence:
+        preferred_side = "put" if short_direction == "bearish" else "call"
+        if preferred_side == "put" and st in ("put_calendar", "diagonal_put"):
+            adj *= 1.07 if st == "diagonal_put" else 1.05
+        elif preferred_side == "call" and st in ("call_calendar", "diagonal_call"):
+            adj *= 1.07 if st == "diagonal_call" else 1.05
+        else:
+            adj *= 0.98
+
+    return round(max(0.95, min(1.08, adj)), 4)
+
+
+def _calc_vol_detail_alignment_adj(
+    strategy: ResolvedStrategy,
+    constraints: Dict[str, Any],
+) -> float:
+    detail = constraints.get("vol_view_detail") if isinstance(constraints, dict) else None
+    if not isinstance(detail, dict):
+        return 1.0
+
+    st = strategy.strategy_type
+    atm = detail.get("atm") if isinstance(detail.get("atm"), dict) else {}
+    call = detail.get("call") if isinstance(detail.get("call"), dict) else {}
+    put = detail.get("put") if isinstance(detail.get("put"), dict) else {}
+    skew = detail.get("skew") if isinstance(detail.get("skew"), dict) else {}
+    term = detail.get("term") if isinstance(detail.get("term"), dict) else {}
+
+    atm_short_up = (
+        atm.get("expected_change") == "up"
+        and atm.get("horizon", "unknown") in ("short_term", "unknown")
+    )
+    term_front_rich = term.get("front") == "rich"
+    put_rich = put.get("level") == "rich" or skew.get("direction") == "put_rich"
+    call_flat_down = call.get("expected_change") in ("flat", "down")
+    call_cheap = call.get("level") == "cheap"
+
+    adj = 1.0
+    if st in ("call_calendar", "put_calendar", "diagonal_call", "diagonal_put"):
+        if atm_short_up:
+            adj *= 1.05 if st in ("call_calendar", "put_calendar") else 1.03
+        if term_front_rich:
+            adj *= 1.04 if st in ("call_calendar", "put_calendar") else 1.02
+
+    if put_rich:
+        if st == "bear_call_spread":
+            adj *= 1.04
+        elif st in ("bull_put_spread", "naked_put"):
+            adj *= 0.96
+        elif st in ("bear_put_spread", "long_put"):
+            adj *= 0.98
+
+    if call_flat_down:
+        if st == "bear_call_spread":
+            adj *= 1.03
+        elif st in ("bull_call_spread", "long_call"):
+            adj *= 0.96
+
+    if call_cheap and st in ("bull_call_spread", "long_call", "diagonal_call"):
+        adj *= 1.04
+
+    return round(max(0.94, min(1.08, adj)), 4)
+
+
 # ============================================================
 # Greeks意图调整（greeks_intent_adj）
 # ============================================================
@@ -366,7 +555,7 @@ def _calc_greeks_intent_adj(
     net_greeks: Dict[str, Any],
 ) -> float:
     """
-    根据用户的Greeks意图偏好调整评分，最多±25%。
+    根据用户的Greeks意图偏好调整评分，给匹配项有限奖励、给错配项保留惩罚。
 
     greeks_preference格式：
     {
@@ -381,8 +570,7 @@ def _calc_greeks_intent_adj(
 
     最终公式：
     intent_score = 加权平均(strength × match) / 加权平均(strength)
-    greeks_adj = 0.75 + 0.25 × intent_score
-    范围：[0.75, 1.0]（只奖不罚到底，最低0.75）
+    greeks_adj 范围：[0.70, 1.10]，匹配最多+10%，错配最多-30%。
 
     strike_forced的腿不参与delta匹配判断：
     如果所有腿都是strike_forced，delta维度跳过。
@@ -436,11 +624,12 @@ def _calc_greeks_intent_adj(
     if total_weight <= 0:
         return 1.0
 
-    intent_score = weighted_match / total_weight
-    # intent_score范围：[-0.5, 1.0]
-    # 映射到adj：[-0.5→0.75, 1.0→1.0]
-    greeks_adj = 0.70 + 0.30 * max(-1.0, intent_score)
-    return round(max(0.75, greeks_adj), 4)
+    intent_score = max(-0.5, min(1.0, weighted_match / total_weight))
+    if intent_score >= 0:
+        greeks_adj = 1.0 + 0.10 * intent_score
+    else:
+        greeks_adj = 1.0 + 0.60 * intent_score
+    return round(max(0.70, min(1.10, greeks_adj)), 4)
 
 
 # ============================================================
@@ -1071,14 +1260,18 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
         # ── 3. Greeks意图调整（基于用户意图与实际Greeks的匹配度）──
         greeks_preference = _extract_greeks_preference(strategy)
         greeks_intent_adj = _calc_greeks_intent_adj(strategy, greeks_preference, greeks)
+        intent_constraints = _extract_intent_constraints(strategy)
+        semantic_intent_adj = _calc_semantic_intent_adj(strategy, intent_constraints, greeks)
+        horizon_alignment_adj = _calc_horizon_alignment_adj(strategy, intent_constraints)
+        vol_detail_alignment_adj = _calc_vol_detail_alignment_adj(strategy, intent_constraints)
 
         # ── 4. prior weight ──
         prior     = _extract_prior_weight(strategy)
         prior_adj = 0.7 + 0.3 * prior
 
         # ── 5. final score ──
-        # 公式：base × greeks_adj × greeks_intent_adj × prior_adj
-        final_score = base_score * adj * greeks_intent_adj * prior_adj
+        # 公式：base × greeks_adj × greeks_intent_adj × semantic_intent_adj × horizon_alignment_adj × vol_detail_alignment_adj × prior_adj
+        final_score = base_score * adj * greeks_intent_adj * semantic_intent_adj * horizon_alignment_adj * vol_detail_alignment_adj * prior_adj
         ranking_components = _build_ranking_components(
             breakdown=breakdown,
             greeks_adj=adj,
@@ -1088,6 +1281,9 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
 
         breakdown["greeks_adj"]        = round(adj, 4)
         breakdown["greeks_intent_adj"] = round(greeks_intent_adj, 4)
+        breakdown["semantic_intent_adj"] = round(semantic_intent_adj, 4)
+        breakdown["horizon_alignment_adj"] = round(horizon_alignment_adj, 4)
+        breakdown["vol_detail_alignment_adj"] = round(vol_detail_alignment_adj, 4)
         breakdown["prior"]             = round(prior, 4)
         breakdown["prior_adj"]         = round(prior_adj, 4)
         breakdown["iv_side_used"]      = iv_signal["iv_side_used"]
@@ -1112,11 +1308,15 @@ def rank_strategies(strategies: List[ResolvedStrategy]) -> List[ResolvedStrategy
             "iv_signal_strength": iv_signal["iv_signal_strength"],
             "iv_alignment_score": iv_signal["iv_alignment_score"],
             "iv_expression": iv_signal["iv_expression"],
+            "vol_detail_alignment_adj": round(vol_detail_alignment_adj, 4),
         })
 
         print(
             f"[rank] {st:<22} base={base_score:.3f} "
             f"adj={adj:.3f} intent_adj={greeks_intent_adj:.3f} "
+            f"semantic_adj={semantic_intent_adj:.3f} "
+            f"horizon_adj={horizon_alignment_adj:.3f} "
+            f"vol_detail_adj={vol_detail_alignment_adj:.3f} "
             f"prior={prior:.2f} final={final_score:.3f}"
         )
         print(

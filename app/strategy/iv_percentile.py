@@ -77,7 +77,7 @@ def _get_label(pct: float) -> tuple[str, str]:
     if pct <= 0.70:
         return "偏高", "elevated"
     if pct <= 0.85:
-        return "高", "high"
+        return "较高", "high"
     return "极高", "very_high"
 
 
@@ -151,7 +151,11 @@ def _build_percentile_payload(
     }
 
 
-def _fetch_latest_snapshot_rows(engine: Engine, underlying_id: str) -> List[Dict[str, Any]]:
+def _fetch_latest_snapshot_rows(
+    engine: Engine,
+    underlying_id: str,
+    min_dte: int = _MIN_DTE,
+) -> List[Dict[str, Any]]:
     sql = text(
         """
         WITH latest AS (
@@ -177,7 +181,7 @@ def _fetch_latest_snapshot_rows(engine: Engine, underlying_id: str) -> List[Dict
                 "underlying_id": underlying_id,
                 "min_valid_iv": _MIN_VALID_IV,
                 "max_valid_iv": _MAX_VALID_IV,
-                "min_dte": _MIN_DTE,
+                "min_dte": min_dte,
             },
         ).mappings().all()
     return [dict(r) for r in rows]
@@ -212,6 +216,9 @@ def _choose_representative_iv(
 def get_current_representative_ivs(engine: Engine, underlying_id: str) -> Dict[str, Optional[float]]:
     try:
         rows = _fetch_latest_snapshot_rows(engine, underlying_id)
+        if not rows:
+            rows = _fetch_latest_snapshot_rows(engine, underlying_id, min_dte=0)
+            print(f"[iv_percentile] uid={underlying_id} relaxed_current_iv_dte_filter rows={len(rows)}")
         current_call = _choose_representative_iv(rows, "CALL", _CALL_TARGET_ABS_DELTA)
         current_put = _choose_representative_iv(rows, "PUT", _PUT_TARGET_ABS_DELTA)
         atm_call = _choose_representative_iv(rows, "CALL", _ATM_TARGET_ABS_DELTA)
@@ -396,8 +403,14 @@ def build_iv_percentile_report(
 
     current_atm = current_ivs.get("atm")
     if current_atm is None:
-        print(f"[iv_percentile] 无法获取 {underlying_id} 的当前 ATM IV")
-        return None
+        fallback_values = [v for v in (current_ivs.get("call"), current_ivs.get("put")) if v is not None]
+        if fallback_values:
+            current_atm = round(sum(fallback_values) / len(fallback_values), 4)
+            current_ivs["atm"] = current_atm
+            print(f"[iv_percentile] uid={underlying_id} atm_missing_use_side_average={current_atm}")
+        else:
+            print(f"[iv_percentile] 无法获取 {underlying_id} 的当前 ATM/CALL/PUT IV")
+            return None
 
     t0 = time.perf_counter()
     history = fetch_historical_representative_ivs(

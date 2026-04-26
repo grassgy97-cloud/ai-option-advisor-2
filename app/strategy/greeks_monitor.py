@@ -1,10 +1,8 @@
 """
-greeks_monitor.py — 策略 Greeks 报告生成
+greeks_monitor.py - strategy Greeks report generation.
 
-改动说明（相比原版）：
-  - build_strategy_greeks_report() 新增 iv_percentile 字段
-  - 需要传入 engine 参数（可选，不传则跳过 IV percentile）
-  - commentary 新增 IV percentile 相关描述
+This module only summarizes already resolved strategy Greeks. It does not
+change strategy selection, ranking, or numerical outputs.
 """
 
 from __future__ import annotations
@@ -90,8 +88,7 @@ def build_risk_flags(strategy: ResolvedStrategy) -> List[str]:
     if net_gamma is not None and net_gamma < -0.5:
         flags.append("short_gamma")
 
-    if strategy.strategy_type in ("call_calendar", "put_calendar",
-                                   "diagonal_call", "diagonal_put"):
+    if strategy.strategy_type in ("call_calendar", "put_calendar", "diagonal_call", "diagonal_put"):
         if net_vega is not None and net_vega <= 0:
             flags.append("vega_not_positive_for_calendar")
         if net_theta is not None and net_theta < -0.002:
@@ -118,40 +115,39 @@ def build_greeks_commentary(
 
     if net_delta is not None:
         if abs(net_delta) <= 0.05:
-            parts.append("组合整体接近delta中性")
+            parts.append("组合整体接近 delta 中性")
         elif net_delta > 0:
-            parts.append("组合略偏多delta")
+            parts.append("组合略偏多 delta")
         else:
-            parts.append("组合略偏空delta")
+            parts.append("组合略偏空 delta")
 
     if net_vega is not None:
-        parts.append("组合为净多vega" if net_vega > 0 else "组合为净空vega")
+        parts.append("组合为净多 vega" if net_vega > 0 else "组合为净空 vega")
 
     if net_theta is not None:
-        parts.append("组合theta为正" if net_theta > 0 else "组合theta为负")
+        parts.append("组合 theta 为正" if net_theta > 0 else "组合 theta 为负")
 
     if net_gamma is not None:
         if net_gamma < -0.5:
-            parts.append("组合呈现较明显净空gamma特征")
+            parts.append("组合呈现较明显净空 gamma 特征")
         elif net_gamma < 0:
-            parts.append("组合轻微净空gamma")
+            parts.append("组合轻微净空 gamma")
         elif net_gamma > 0.5:
-            parts.append("组合呈现较明显净多gamma特征")
+            parts.append("组合呈现较明显净多 gamma 特征")
 
     if iv_diff is not None:
         if iv_diff <= -0.005:
-            parts.append("近远月隐波结构对该calendar较为有利")
+            parts.append("近远月隐波结构对 calendar 较为有利")
         elif iv_diff < 0:
             parts.append("近远月隐波结构略偏有利")
         else:
             parts.append("近远月隐波结构信号偏弱")
 
-    # ── IV percentile 描述 ──
     if iv_pct_report:
         label = iv_pct_report.get("label", "")
         pct = iv_pct_report.get("composite_percentile")
         if pct is not None:
-            parts.append(f"当前ATM IV处于{label}水平（{pct:.0%}分位）")
+            parts.append(f"当前 ATM IV 处于{label}水平（{pct:.0%}分位）")
 
     return "，".join(parts) + "。"
 
@@ -161,25 +157,17 @@ def build_strategy_greeks_report(
     engine: Optional[Engine] = None,
     iv_pct_report: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    生成策略 Greeks 报告。
-
-    参数说明：
-      - iv_pct_report：若外部已预先算好 IV percentile，直接传入，避免重复查库
-      - engine：仅在 iv_pct_report 未提供时，才会尝试现算（兼容旧调用）
-    """
-    # 优先使用外部传入的 iv_pct_report，避免重复查库
+    """Generate a strategy Greeks report."""
     final_iv_pct_report = iv_pct_report
 
-    # 仅在外部未传入时，才回退到旧逻辑
     if final_iv_pct_report is None and engine is not None:
         try:
             final_iv_pct_report = build_iv_percentile_report(
                 engine=engine,
                 underlying_id=strategy.underlying_id,
             )
-        except Exception as e:
-            print(f"[greeks_monitor] iv_percentile failed: {e}")
+        except Exception as exc:
+            print(f"[greeks_monitor] iv_percentile failed: {exc}")
 
     report: Dict[str, Any] = {
         "strategy_type": strategy.strategy_type,
@@ -190,10 +178,7 @@ def build_strategy_greeks_report(
         "commentary": build_greeks_commentary(strategy, final_iv_pct_report),
     }
 
-    if strategy.strategy_type in (
-        "call_calendar", "put_calendar",
-        "diagonal_call", "diagonal_put",
-    ):
+    if strategy.strategy_type in ("call_calendar", "put_calendar", "diagonal_call", "diagonal_put"):
         report["term_structure"] = build_calendar_term_structure(strategy)
 
     if final_iv_pct_report is not None:
