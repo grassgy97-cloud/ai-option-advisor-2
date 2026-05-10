@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
+from app.api.admin_calendar import router as admin_calendar_router
 from app.api.advisor_v2 import router as advisor_router
 from app.api.covered_call_api import router as covered_call_router
 from app.api.debug import router as debug_router
@@ -16,6 +17,7 @@ app.include_router(covered_call_router)
 app.include_router(monitor_router)
 app.include_router(positions_router)
 app.include_router(debug_router)
+app.include_router(admin_calendar_router)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -439,6 +441,26 @@ HTML_PAGE = """<!DOCTYPE html>
 .contract-meta-status.ok {
   color: #236b3a;
 }
+.calendar-date-list {
+  min-height: 70px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #cbd7e6;
+  border-radius: 8px;
+  resize: vertical;
+}
+.calendar-status {
+  margin-top: 10px;
+  font-size: 13px;
+  color: #41546d;
+  white-space: pre-wrap;
+}
+.calendar-list {
+  margin-top: 10px;
+  font-size: 13px;
+  color: #2d3b4f;
+  line-height: 1.7;
+}
 </style>
 </head>
 <body>
@@ -564,6 +586,34 @@ IV 偏高，想收 theta；
 <section class="positions-section">
   <div class="positions-header">
     <div>
+      <h2>非交易日补录</h2>
+      <div class="textarea-hint">用于手工维护工作日里的节假日/非交易日；IV percentile 会排除这些日期的快照。</div>
+    </div>
+    <div class="positions-actions">
+      <button id="btn-calendar-refresh" type="button">刷新列表</button>
+    </div>
+  </div>
+  <div class="position-grid">
+    <label>选择日期
+      <input id="calendar-date-picker" type="date">
+    </label>
+    <label>备注
+      <input id="calendar-reason" value="manual_non_trading_day" placeholder="例如 春节 / 国庆 / 临时休市">
+    </label>
+  </div>
+  <div class="positions-actions" style="margin-top:10px">
+    <button id="btn-calendar-add-date" type="button">加入待提交</button>
+    <button id="btn-calendar-submit" type="button">提交补录</button>
+  </div>
+  <label class="textarea-hint" style="display:block;margin-top:10px">待提交日期（可一行一个，或用逗号/空格分隔）</label>
+  <textarea id="calendar-date-list" class="calendar-date-list" placeholder="2026-05-01&#10;2026-10-01"></textarea>
+  <div id="calendar-status" class="calendar-status"></div>
+  <div id="calendar-list" class="calendar-list"></div>
+</section>
+
+<section class="positions-section">
+  <div class="positions-header">
+    <div>
       <h2>持仓管理</h2>
       <div class="textarea-hint">手动录入当前持仓腿；covered_call 或不计入组合 Greeks 的腿仍会显示，但不会进入标的聚合监控。</div>
     </div>
@@ -651,6 +701,19 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function valueOrDash(value) {
+  return value !== undefined && value !== null ? value : '-';
+}
+
+function formatRiskGreeks(row) {
+  return `<div class="greeks">
+    <span>方向敞口 ${escapeHtml(valueOrDash(row.delta_share_equiv))} 股ETF</span>
+    <span>标的涨跌1% ${escapeHtml(valueOrDash(row.delta_rmb_per_1pct))} 元</span>
+    <span>每天时间损益 ${escapeHtml(valueOrDash(row.theta_rmb_per_day))} 元</span>
+    <span>IV变动1点 ${escapeHtml(valueOrDash(row.vega_rmb_per_1vol))} 元</span>
+  </div>`;
+}
+
 function setShortcut(text) {
   document.getElementById('text').value = text;
 }
@@ -732,10 +795,10 @@ async function runAdvisor() {
   btn.disabled = true;
   status.className = 'loading';
   status.textContent = isAll
-    ? '全量分析中，预计需要 30-120 秒…'
+    ? 'Analyzing all underlyings, this may take 30-120s...'
     : selectedIds.length > 1
-      ? `分析 ${selectedIds.length} 个标的中，预计需要 20-40 秒…`
-      : '分析中…';
+      ? `Analyzing ${selectedIds.length} underlyings, this may take 20-40s...`
+      : 'Analyzing...';
 
   clearResultArea();
 
@@ -767,7 +830,7 @@ async function runAdvisor() {
     status.textContent = '';
   } catch (e) {
     status.className = 'error';
-    status.textContent = '请求失败：' + e.message;
+    status.textContent = 'Request failed: ' + e.message;
   } finally {
     clearTimeout(timeoutId);
     btn.disabled = false;
@@ -848,7 +911,7 @@ async function runCoveredCall() {
     status.textContent = '';
   } catch (e) {
     status.className = 'error';
-    status.textContent = '请求失败：' + e.message;
+    status.textContent = 'Request failed: ' + e.message;
   } finally {
     btn.disabled = false;
   }
@@ -864,6 +927,25 @@ function renderIntentBar(intent) {
   const pl = intent.price_levels || {};
   const plStr = Object.entries(pl).map(([k, v]) => `${k}:${(v * 100).toFixed(1)}%`).join(' ');
   const underlyings = intent.underlying_ids || [intent.underlying_id].filter(Boolean);
+  const hv = intent.horizon_views || {};
+  const horizonLabels = { short_term: '短期', medium_term: '中期', long_term: '长期' };
+  const directionLabels = {
+    bullish: '偏多',
+    bearish: '偏空',
+    neutral: '中性',
+    unknown: '未知',
+    upside_risk: '上冲风险',
+    recovery: '修复',
+  };
+  const hvStr = ['short_term', 'medium_term', 'long_term'].map((key) => {
+    const item = hv[key];
+    if (!item) return '';
+    const direction = directionLabels[item.direction] || item.direction || '-';
+    const strength = item.direction_strength !== undefined && item.direction_strength !== null
+      ? `(${item.direction_strength})`
+      : '';
+    return `${horizonLabels[key]}:${direction}${strength}`;
+  }).filter(Boolean).join(' ');
 
   intentBar.innerHTML = `
     <span>解析：</span>
@@ -871,6 +953,7 @@ function renderIntentBar(intent) {
     <span class="badge">vol: ${escapeHtml(intent.vol_view || '-')}</span>
     <span class="badge">标的: ${escapeHtml(underlyings.join(', '))}</span>
     <span class="badge">DTE: ${escapeHtml(intent.dte_min)}-${escapeHtml(intent.dte_max)}天</span>
+    ${hvStr ? `<span class="badge">Horizon: ${escapeHtml(hvStr)}</span>` : ''}
     ${gpStr ? `<span class="badge">Greeks: ${escapeHtml(gpStr)}</span>` : ''}
     ${plStr ? `<span class="badge">价位: ${escapeHtml(plStr)}</span>` : ''}
     ${intent.asymmetry ? `<span class="badge">偏态: ${escapeHtml(intent.asymmetry)}</span>` : ''}
@@ -930,9 +1013,11 @@ function renderResult(data) {
     const scoreClass = r.score >= 0.80 ? 'score-high' : r.score >= 0.60 ? 'score-mid' : 'score-low';
     const flags = (r.risk_flags || []).map(f => `<span class="flag">${escapeHtml(f)}</span>`).join('');
     const greeks = `<div class="greeks">
-      <span>Δ=${escapeHtml(r.net_delta)}</span>
-      <span>V=${escapeHtml(r.net_vega)}</span>
-      <span>Θ=${escapeHtml(r.net_theta)}</span>
+      <span>Δ份额=${escapeHtml(valueOrDash(r.delta_share_equiv))}</span>
+      <span>Θ￥/day=${escapeHtml(valueOrDash(r.theta_rmb_per_day))}</span>
+      <span>V￥/1vol=${escapeHtml(valueOrDash(r.vega_rmb_per_1vol))}</span>
+      <span>Γ￥/1%=${escapeHtml(valueOrDash(r.gamma_rmb_per_1pct_move))}</span>
+      <span>raw Δ=${escapeHtml(r.raw_net_delta ?? r.net_delta)}</span>
     </div>`;
     const ivTriplet = r.iv_triplet_display || [
       formatIvPart(r.atm_iv_pct, r.iv_pct),
@@ -949,7 +1034,7 @@ function renderResult(data) {
       <td><b>${escapeHtml(r.strategy)}</b></td>
       <td class="${scoreClass}">${escapeHtml(r.score)}<br><span class="score-label">${escapeHtml(r.score_tier_label || '')}</span></td>
       <td>${escapeHtml(r.cost)}</td>
-      <td>${greeks}</td>
+      <td>${formatRiskGreeks(r)}</td>
       <td><span class="iv-label">${escapeHtml(ivTriplet)}</span></td>
       <td class="legs-cell">${escapeHtml(r.legs || '').replace(/ \\/ /g, '<br>')}</td>
       <td>${profit}</td>
@@ -1244,14 +1329,51 @@ async function monitorUnderlying(underlyingId) {
       '风险解释: ' + (llm.risk_explanation || '-'),
       '行动建议: ' + ((llm.actionable_suggestions || []).join(' / ') || '-'),
     ] : [];
-    const valueOrDash = function(value) {
-      return value !== undefined && value !== null ? value : '-';
+    const pctOrDash = function(value) {
+      return value !== undefined && value !== null ? (Number(value) * 100).toFixed(2) + '%' : '-';
     };
+    const underlyingPosition = data.underlying_position_summary || {};
+    const portfolioRisk = data.portfolio_risk_summary || {};
+    const totalRiskGreeks = portfolioRisk.total_risk_greeks || {};
+    const coveredRows = data.covered_call_coverage || [];
+    const shortStrikeMap = data.short_strike_risk_map || [];
+    const mostDangerous = shortStrikeMap.length ? shortStrikeMap[0] : (portfolioRisk.distance_to_short_strike || {});
+    const managementSuggestions = data.management_suggestions || [];
+    const portfolioDeltaShareEquiv = valueOrDash(totalRiskGreeks.delta_share_equiv !== undefined ? totalRiskGreeks.delta_share_equiv : summary.delta_share_equiv);
+    const portfolioDeltaRmb = valueOrDash(totalRiskGreeks.delta_rmb_per_1pct !== undefined ? totalRiskGreeks.delta_rmb_per_1pct : summary.delta_rmb_per_1pct);
+    const portfolioTheta = valueOrDash(totalRiskGreeks.theta_rmb_per_day !== undefined ? totalRiskGreeks.theta_rmb_per_day : summary.theta_rmb_per_day);
+    const portfolioVega = valueOrDash(totalRiskGreeks.vega_rmb_per_1vol !== undefined ? totalRiskGreeks.vega_rmb_per_1vol : summary.vega_rmb_per_1vol);
+    const coveredStatus = valueOrDash(data.covered_call_risk_status || summary.covered_call_risk_status || 'no_short_call');
+    const coveredRatio = data.covered_ratio !== undefined && data.covered_ratio !== null ? data.covered_ratio : summary.covered_ratio;
+    const uncoveredShortCalls = data.uncovered_short_call_contracts !== undefined && data.uncovered_short_call_contracts !== null ? data.uncovered_short_call_contracts : summary.uncovered_short_call_contracts;
+    const shortStrikeLine = mostDangerous && mostDangerous.contract_id ? [
+      'Most dangerous short strike: ' + mostDangerous.contract_id,
+      'type=' + valueOrDash(mostDangerous.option_type),
+      'strike=' + valueOrDash(mostDangerous.strike),
+      'distance=' + pctOrDash(mostDangerous.distance_to_short_strike),
+      'status=' + valueOrDash(mostDangerous.status),
+      'assignment_risk=' + valueOrDash(mostDangerous.assignment_risk),
+    ].join(' / ') : 'Most dangerous short strike: -';
+    const coveredLine = 'Covered Call: covered_ratio=' + valueOrDash(coveredRatio) +
+      ' / status=' + coveredStatus +
+      ' / uncovered_short_call_contracts=' + valueOrDash(uncoveredShortCalls) +
+      ' / rows=' + (coveredRows.length ? coveredRows.map(function(row) {
+        return valueOrDash(row.contract_id) + ':' + valueOrDash(row.strategy_bucket) + ':' + valueOrDash(row.coverage_status);
+      }).join(' / ') : 'no_short_call');
+    const managementLine = 'Management suggestions: ' + (managementSuggestions.length ? managementSuggestions.map(function(s) {
+      return valueOrDash(s.goal) + ' | trigger=' + valueOrDash(s.trigger) + ' | action=' + valueOrDash(s.suggested_action) + ' | code=' + valueOrDash(s.reason_code);
+    }).join(' / ') : '-');
     box.textContent = [
       '标的: ' + (data.underlying_id || '-'),
       '状态: ' + (summary.status || '-') + ' / 建议: ' + (summary.recommended_action || '-'),
       'Spot: ' + valueOrDash(summary.spot) + ' / PnL: ' + valueOrDash(summary.pnl_estimate) + ' RMB / DTE: ' + valueOrDash(summary.dte),
-      'Greeks: Δ=' + valueOrDash(summary.net_delta) + ' Γ=' + valueOrDash(summary.net_gamma) + ' Θ=' + valueOrDash(summary.net_theta) + ' V=' + valueOrDash(summary.net_vega),
+      'Underlying position: shares=' + valueOrDash(underlyingPosition.shares) + ' / avg_entry=' + valueOrDash(underlyingPosition.avg_entry_price) + ' / delta_share_equiv=' + valueOrDash(underlyingPosition.delta_share_equiv),
+      coveredLine,
+      'Portfolio Risk Greeks: delta_share_equiv=' + portfolioDeltaShareEquiv + ' / delta_rmb_per_1pct=' + portfolioDeltaRmb + ' / theta_rmb_per_day=' + portfolioTheta + ' / vega_rmb_per_1vol=' + portfolioVega,
+      shortStrikeLine,
+      managementLine,
+      'Risk Greeks: Δ份额=' + valueOrDash(summary.delta_share_equiv) + ' Θ￥/day=' + valueOrDash(summary.theta_rmb_per_day) + ' V￥/1vol=' + valueOrDash(summary.vega_rmb_per_1vol) + ' Γ￥/1%=' + valueOrDash(summary.gamma_rmb_per_1pct_move),
+      'Raw Greeks: Δ=' + valueOrDash(summary.net_delta) + ' Γ=' + valueOrDash(summary.net_gamma) + ' Θ=' + valueOrDash(summary.net_theta) + ' V=' + valueOrDash(summary.net_vega),
       'Risk flags: ' + ((summary.risk_flags || []).join(', ') || '-'),
       '主要风险腿: ' + (contributors.length ? contributors.map(function(c) {
         return c.leg_id + ':' + c.reason + ':' + c.suggested_action;
@@ -1265,6 +1387,146 @@ async function monitorUnderlying(underlyingId) {
     console.error('[positions] monitor failed', e);
     box.textContent = '监控失败：' + (e.message || e);
   }
+}
+
+function parseCalendarDateInput() {
+  const textarea = document.getElementById('calendar-date-list');
+  const raw = textarea ? textarea.value : '';
+  const tokens = raw.split(/[\s,，;；]+/).map(function(x) { return x.trim(); }).filter(Boolean);
+  const seen = {};
+  return tokens.filter(function(dateText) {
+    if (seen[dateText]) return false;
+    seen[dateText] = true;
+    return true;
+  });
+}
+
+function setCalendarStatus(message) {
+  const status = document.getElementById('calendar-status');
+  if (status) status.textContent = message || '';
+}
+
+function addCalendarDateFromPicker() {
+  const picker = document.getElementById('calendar-date-picker');
+  const textarea = document.getElementById('calendar-date-list');
+  if (!picker || !textarea || !picker.value) return;
+  const dates = parseCalendarDateInput();
+  if (!dates.includes(picker.value)) {
+    dates.push(picker.value);
+  }
+  textarea.value = dates.join('\\n');
+}
+
+async function loadNonTradingDays() {
+  const list = document.getElementById('calendar-list');
+  if (!list) return;
+  try {
+    const resp = await fetch('/admin/calendar/non-trading-days');
+    if (!resp.ok) {
+      list.textContent = '读取失败：' + await resp.text();
+      return;
+    }
+    const raw = await resp.json();
+    const rows = raw.data || [];
+    if (!rows.length) {
+      list.textContent = '暂无手工补录的非交易日。';
+      return;
+    }
+    list.innerHTML = rows.slice(0, 60).map(function(row) {
+      return [
+        '<div>',
+        '<b>' + escapeHtml(row.trade_date) + '</b>',
+        ' / ' + escapeHtml(row.reason || '-'),
+        ' <button type="button" data-calendar-delete="' + escapeHtml(row.trade_date) + '">删除</button>',
+        '</div>',
+      ].join('');
+    }).join('');
+  } catch (e) {
+    list.textContent = '读取失败：' + (e.message || e);
+  }
+}
+
+async function submitNonTradingDays() {
+  const dates = parseCalendarDateInput();
+  const reasonEl = document.getElementById('calendar-reason');
+  const reason = reasonEl ? reasonEl.value.trim() : '';
+  if (!dates.length) {
+    setCalendarStatus('请先选择或填写至少一个日期。');
+    return;
+  }
+  setCalendarStatus('提交中...');
+  try {
+    const resp = await fetch('/admin/calendar/non-trading-days', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dates, reason: reason || null }),
+    });
+    if (!resp.ok) {
+      setCalendarStatus('提交失败：' + await resp.text());
+      return;
+    }
+    const raw = await resp.json();
+    const data = raw.data || {};
+    const skipped = (data.skipped || []).map(function(item) {
+      return item.date + ':' + item.reason;
+    }).join(' / ');
+    setCalendarStatus(
+      '已补录 ' + valueOrDash(data.count) + ' 个日期：' +
+      ((data.inserted_or_updated || []).join(', ') || '-') +
+      (skipped ? '\\n跳过：' + skipped : '')
+    );
+    await loadNonTradingDays();
+  } catch (e) {
+    setCalendarStatus('提交失败：' + (e.message || e));
+  }
+}
+
+async function deleteNonTradingDay(tradeDate) {
+  if (!tradeDate) return;
+  try {
+    const resp = await fetch('/admin/calendar/non-trading-days/' + encodeURIComponent(tradeDate), {
+      method: 'DELETE',
+    });
+    if (!resp.ok) {
+      setCalendarStatus('删除失败：' + await resp.text());
+      return;
+    }
+    setCalendarStatus('已删除：' + tradeDate);
+    await loadNonTradingDays();
+  } catch (e) {
+    setCalendarStatus('删除失败：' + (e.message || e));
+  }
+}
+
+function initCalendarInteractions() {
+  const addButton = document.getElementById('btn-calendar-add-date');
+  if (addButton) {
+    addButton.addEventListener('click', addCalendarDateFromPicker);
+  }
+  const submitButton = document.getElementById('btn-calendar-submit');
+  if (submitButton) {
+    submitButton.addEventListener('click', function() {
+      submitNonTradingDays();
+    });
+  }
+  const refreshButton = document.getElementById('btn-calendar-refresh');
+  if (refreshButton) {
+    refreshButton.addEventListener('click', function() {
+      loadNonTradingDays();
+    });
+  }
+  const list = document.getElementById('calendar-list');
+  if (list) {
+    list.addEventListener('click', function(e) {
+      const target = e.target;
+      if (!target || !target.getAttribute) return;
+      const tradeDate = target.getAttribute('data-calendar-delete');
+      if (tradeDate) deleteNonTradingDay(tradeDate);
+    });
+  }
+  loadNonTradingDays().catch(function(e) {
+    console.error('[calendar] initial load failed', e);
+  });
 }
 
 window.runAdvisor = runAdvisor;
@@ -1413,8 +1675,13 @@ function initPositions() {
   initPositionInteractions();
 }
 
+function initCalendar() {
+  initCalendarInteractions();
+}
+
 function initPage() {
   safeInit('advisor', initAdvisor);
+  safeInit('calendar', initCalendar);
   safeInit('positions', initPositions);
 }
 

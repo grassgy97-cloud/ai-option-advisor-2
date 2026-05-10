@@ -367,14 +367,39 @@ def build_briefing_llm_commentary(
     if not briefing or not decision_payload:
         return _unavailable("missing_structured_context")
 
+    primary = decision_payload.get("primary_recommendations") or []
+    secondary = decision_payload.get("secondary_recommendations") or []
+    watchlist = decision_payload.get("watchlist") or []
+    briefing_table = briefing.get("table") or []
+    if not primary and not secondary and not watchlist and not briefing_table:
+        text = (
+            f"{SECTION_MARKET}当前没有形成可执行候选，先不输出具体策略判断。\n\n"
+            f"{SECTION_PRIMARY}无主策略；应等待 resolver 能落到真实合约腿后再评估。\n\n"
+            f"{SECTION_ALT}不比较备选策略，因为没有通过解析和合约匹配的候选。\n\n"
+            f"{SECTION_EXECUTION}暂不交易；先检查 DTE、价差、硬约束或放宽候选范围。\n\n"
+            f"{SECTION_RISK}主要风险是空候选时误把市场结构当成交易建议。"
+        )
+        return {
+            "available": True,
+            "text": text,
+            "market_structure": "当前没有形成可执行候选，先不输出具体策略判断。",
+            "primary_logic": "无主策略；应等待 resolver 能落到真实合约腿后再评估。",
+            "alternative_comparison": "不比较备选策略，因为没有通过解析和合约匹配的候选。",
+            "execution_points": "暂不交易；先检查 DTE、价差、硬约束或放宽候选范围。",
+            "risk_warning": "主要风险是空候选时误把市场结构当成交易建议。",
+            "summary": "当前没有形成可执行候选。",
+            "why_primary": "无主策略。",
+            "what_to_watch": ["检查 DTE、价差、硬约束或放宽候选范围。"],
+        }
+
     first_metadata = getattr(ranked[0], "metadata", {}) if ranked else {}
     intent_constraints = first_metadata.get("intent_constraints", {}) if isinstance(first_metadata, dict) else {}
     payload = {
-        "primary_recommendations": decision_payload.get("primary_recommendations") or [],
-        "secondary_recommendations": decision_payload.get("secondary_recommendations") or [],
+        "primary_recommendations": primary,
+        "secondary_recommendations": secondary,
         "decision_payload": decision_payload,
         "strategy_rankings": [_compact_strategy(item) for item in ranked[:3]],
-        "briefing_table_top": (briefing.get("table") or [])[:5],
+        "briefing_table_top": briefing_table[:5],
         "recommendation_groups": briefing.get("recommendation_groups") or [],
         "market_overview": briefing.get("market_overview") or [],
         "cross_underlying_summary": briefing.get("cross_underlying_summary") or {},

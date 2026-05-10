@@ -138,6 +138,79 @@ def _normalize_strategy_names(raw_names: Any, field_name: str) -> List[str]:
     return normalized
 
 
+def _extract_structure_bans(text: str) -> Dict[str, Any]:
+    t = (text or "").strip().lower()
+    no_calendar = any(
+        k in t
+        for k in (
+            "不做跨期",
+            "不要跨期",
+            "不做日历",
+            "不要日历",
+            "不做calendar",
+            "不做 calendar",
+            "不要calendar",
+            "不要 calendar",
+            "no calendar",
+            "not calendar",
+        )
+    )
+    no_diagonal = any(
+        k in t
+        for k in (
+            "不做diagonal",
+            "不做 diagonal",
+            "不要diagonal",
+            "不要 diagonal",
+            "不做对角",
+            "不要对角",
+            "no diagonal",
+            "not diagonal",
+        )
+    )
+    banned: List[str] = []
+    if no_calendar:
+        banned.extend(["call_calendar", "put_calendar"])
+    if no_diagonal:
+        banned.extend(["diagonal_call", "diagonal_put"])
+    return {
+        "no_calendar": no_calendar,
+        "no_diagonal": no_diagonal,
+        "banned_strategies": banned,
+    }
+
+
+def _extract_dte_override(text: str) -> Optional[tuple[int, int]]:
+    t = (text or "").strip().lower()
+    has_medium = any(k in t for k in ("中期", "中线", "30到60天", "30-60天", "未来一个月", "一两个月"))
+    has_short = any(k in t for k in ("短期", "短线", "近期", "近月", "本周", "未来几天", "这几天"))
+    if has_medium:
+        return 30, 60
+    if has_short:
+        return 10, 35
+    return None
+
+
+def _text_has_hard_allow_strategy_language(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return any(
+        keyword in t
+        for keyword in (
+            "只做",
+            "仅做",
+            "只考虑",
+            "仅考虑",
+            "限定",
+            "指定",
+            "必须用",
+            "只能",
+            "only",
+            "only use",
+            "allow only",
+        )
+    )
+
+
 def _merge_greeks_with_context(
     greeks_preference: dict,
     market_context: dict,
@@ -245,20 +318,43 @@ def _extract_text_intent_overrides(text: str) -> Dict[str, Any]:
         k in t
         for k in ("保留一个方向性备选", "方向性备选", "方向备选", "备选方案", "directional backup")
     )
-    weak_bearish_range = any(
+    upper_boundary = any(
         k in t
-        for k in ("震荡偏弱", "上方空间有限", "不会大涨", "有压力", "有cap", "有 cap")
+        for k in ("上方空间有限", "不会大涨", "上方有压力", "上方压力", "压力位", "有压力", "有cap", "有 cap")
     )
-    weak_bullish_range = any(
+    lower_boundary = any(
         k in t
-        for k in ("震荡偏强", "下方空间有限", "不会大跌", "有支撑")
+        for k in ("下方空间有限", "不会大跌", "下方有支撑", "下方支撑", "支撑位", "有支撑")
     )
+    two_sided_range = any(
+        k in t
+        for k in (
+            "上下都有边界",
+            "上下有边界",
+            "上下都有界",
+            "上下都有压力和支撑",
+            "上有压力下有支撑",
+            "上方压力下方支撑",
+            "上方有压力下方有支撑",
+            "区间震荡",
+            "震荡区间",
+            "箱体震荡",
+            "区间内震荡",
+            "range bound",
+            "range-bound",
+        )
+    )
+    weak_bearish_range = any(k in t for k in ("震荡偏弱",)) or (upper_boundary and not lower_boundary)
+    weak_bullish_range = any(k in t for k in ("震荡偏强",)) or (lower_boundary and not upper_boundary)
     neutral_structure = any(
         k in t
         for k in ("没有明确方向判断", "没有方向判断", "无明确方向", "中性", "震荡", "区间", "不确定涨跌方向", "range")
     )
+    two_sided_range = bool(two_sided_range or (upper_boundary and lower_boundary))
     range_bias = None
-    if weak_bearish_range:
+    if two_sided_range:
+        range_bias = "strict_range"
+    elif weak_bearish_range:
         range_bias = "weak_bearish_range"
     elif weak_bullish_range:
         range_bias = "weak_bullish_range"
@@ -308,15 +404,19 @@ def _segment_between(text: str, start_keywords: tuple[str, ...], stop_keywords: 
 
 def _infer_horizon_direction(segment: str) -> tuple[str, float]:
     s = (segment or "").lower()
+    if any(k in s for k in ("逼空", "上冲风险", "继续上冲", "短期上冲")):
+        return "upside_risk", 0.70
+    if any(k in s for k in ("政策支撑", "长期修复", "长线修复", "长期看好", "长线看好")):
+        return "bullish", 0.65
     if any(k in s for k in ("不悲观", "不太悲观", "修复", "企稳", "中性", "震荡", "区间")):
         return "neutral", 0.45
     if any(k in s for k in ("非常看空", "明显偏空", "明显看空", "大跌")):
         return "bearish", 0.80
-    if any(k in s for k in ("偏空", "看空", "偏弱", "下跌", "走弱")):
+    if any(k in s for k in ("偏空", "看空", "偏弱", "下跌", "走弱", "回调")):
         return "bearish", 0.60
     if any(k in s for k in ("非常看多", "明显偏多", "明显看多", "大涨")):
         return "bullish", 0.80
-    if any(k in s for k in ("偏多", "看多", "偏强", "上涨", "走强")):
+    if any(k in s for k in ("偏多", "看多", "偏强", "上涨", "走强", "反弹", "上冲")):
         return "bullish", 0.60
     return "unknown", 0.0
 
@@ -339,16 +439,19 @@ def _infer_horizon_vol_bias(segment: str) -> str:
 def _extract_horizon_views(text: str) -> Optional[Dict[str, Dict[str, Any]]]:
     raw = text or ""
     t = raw.lower()
-    short_keywords = ("短期", "近期", "近月", "本周", "未来几天", "这几天")
-    medium_keywords = ("中期", "后续", "一两个月", "未来一个月", "中远期")
+    short_keywords = ("短期", "短线", "近期", "近月", "本周", "未来几天", "这几天")
+    medium_keywords = ("中期", "中线", "后续", "一两个月", "未来一个月", "中远期")
+    long_keywords = ("长期", "长线", "远期", "未来半年", "一年", "政策支撑")
+    all_horizon_keywords = short_keywords + medium_keywords + long_keywords
     has_short = any(k in t for k in short_keywords)
     has_medium = any(k in t for k in medium_keywords)
-    if not has_short and not has_medium:
+    has_long = any(k in t for k in long_keywords)
+    if not has_short and not has_medium and not has_long:
         return None
 
     out: Dict[str, Dict[str, Any]] = {}
     if has_short:
-        segment = _segment_between(raw, short_keywords, medium_keywords) or raw
+        segment = _segment_between(raw, short_keywords, medium_keywords + long_keywords) or raw
         direction, strength = _infer_horizon_direction(segment)
         out["short_term"] = {
             "direction": direction,
@@ -356,9 +459,17 @@ def _extract_horizon_views(text: str) -> Optional[Dict[str, Dict[str, Any]]]:
             "vol_bias": _infer_horizon_vol_bias(segment),
         }
     if has_medium:
-        segment = _segment_between(raw, medium_keywords, short_keywords) or raw
+        segment = _segment_between(raw, medium_keywords, short_keywords + long_keywords) or raw
         direction, strength = _infer_horizon_direction(segment)
         out["medium_term"] = {
+            "direction": direction,
+            "direction_strength": strength,
+            "vol_bias": _infer_horizon_vol_bias(segment),
+        }
+    if has_long:
+        segment = _segment_between(raw, long_keywords, tuple(k for k in all_horizon_keywords if k not in long_keywords)) or raw
+        direction, strength = _infer_horizon_direction(segment)
+        out["long_term"] = {
             "direction": direction,
             "direction_strength": strength,
             "vol_bias": _infer_horizon_vol_bias(segment),
@@ -370,12 +481,12 @@ def _normalize_horizon_views(value: Any) -> Optional[Dict[str, Dict[str, Any]]]:
     if not isinstance(value, dict):
         return None
     out: Dict[str, Dict[str, Any]] = {}
-    for key in ("short_term", "medium_term"):
+    for key in ("short_term", "medium_term", "long_term"):
         item = value.get(key)
         if not isinstance(item, dict):
             continue
         direction = item.get("direction", "unknown")
-        if direction not in ("bullish", "bearish", "neutral", "unknown"):
+        if direction not in ("bullish", "bearish", "neutral", "unknown", "upside_risk", "recovery"):
             direction = "unknown"
         vol_bias = item.get("vol_bias", "unknown")
         if vol_bias not in ("up", "down", "flat", "unknown"):
@@ -498,6 +609,8 @@ def parse_text_to_intent(
         return _rule_parse_text_to_intent(text, underlying_id)
 
     overrides = _extract_text_intent_overrides(text)
+    structure_bans = _extract_structure_bans(text)
+    dte_override = _extract_dte_override(text)
 
     underlying_ids = result.get("underlying_ids", [])
     if not underlying_ids:
@@ -507,7 +620,7 @@ def parse_text_to_intent(
         result.get("preferred_strategies", []),
         field_name="preferred_strategies",
     )
-    allowed_strategies = preferred if preferred else None
+    allowed_strategies = preferred if preferred and _text_has_hard_allow_strategy_language(text) else None
 
     banned_strategies = _normalize_strategy_names(
         result.get("banned_strategies", []),
@@ -517,6 +630,9 @@ def parse_text_to_intent(
         for strategy_type in ("naked_call", "naked_put"):
             if strategy_type not in banned_strategies:
                 banned_strategies.append(strategy_type)
+    for strategy_type in structure_bans["banned_strategies"]:
+        if strategy_type not in banned_strategies:
+            banned_strategies.append(strategy_type)
 
     raw_greeks = result.get("greeks_preference", {})
     greeks_preference: Dict[str, Dict[str, Any]] = {}
@@ -590,8 +706,8 @@ def parse_text_to_intent(
         risk_preference=result.get("risk_preference", "low"),
         defined_risk_only=bool(result.get("defined_risk_only", False) or overrides["defined_risk_only"]),
         prefer_multi_leg=bool(result.get("prefer_multi_leg", False) or overrides["prefer_multi_leg"]),
-        dte_min=result.get("dte_min", 20),
-        dte_max=result.get("dte_max", 45),
+        dte_min=dte_override[0] if dte_override else result.get("dte_min", 20),
+        dte_max=dte_override[1] if dte_override else result.get("dte_max", 45),
         max_rel_spread=0.03,
         min_quote_size=1,
         allowed_strategies=allowed_strategies,
@@ -600,6 +716,8 @@ def parse_text_to_intent(
         require_positive_theta=bool(result.get("require_positive_theta", False) or overrides["require_positive_theta"]),
         prefer_income_family=bool(result.get("prefer_income_family", False) or overrides["prefer_income_family"]),
         ban_naked_short=bool(result.get("ban_naked_short", False) or overrides["ban_naked_short"]),
+        no_calendar=structure_bans["no_calendar"],
+        no_diagonal=structure_bans["no_diagonal"],
         prefer_directional_backup=bool(result.get("prefer_directional_backup", False) or overrides["prefer_directional_backup"]),
         prefer_neutral_structure=bool(result.get("prefer_neutral_structure", False) or overrides["prefer_neutral_structure"]),
         range_bias=range_bias,
@@ -625,6 +743,7 @@ def _parse_underlying_ids(text: str, default_id: str) -> List[str]:
 def _rule_parse_text_to_intent(text: str, underlying_id: str = "510300") -> IntentSpec:
     t = (text or "").strip().lower()
     overrides = _extract_text_intent_overrides(text)
+    structure_bans = _extract_structure_bans(text)
 
     market_view = "neutral"
     vol_view = "none"
@@ -673,14 +792,12 @@ def _rule_parse_text_to_intent(text: str, underlying_id: str = "510300") -> Inte
         prefer_multi_leg = True
     if overrides["prefer_multi_leg"]:
         prefer_multi_leg = True
-    if any(k in t for k in ["近月", "front month"]):
+    dte_override = _extract_dte_override(text)
+    if dte_override:
+        dte_min, dte_max = dte_override
+    elif any(k in t for k in ["近月", "front month"]):
         dte_min, dte_max = 10, 35
-    if any(k in t for k in ["中期", "30到60天", "30-60天"]):
-        dte_min, dte_max = 30, 60
-    if any(k in t for k in ["不做日历", "不要calendar", "no calendar"]):
-        banned_strategies.extend(["call_calendar", "put_calendar"])
-    if any(k in t for k in ["不做对角", "不要diagonal", "no diagonal"]):
-        banned_strategies.extend(["diagonal_call", "diagonal_put"])
+    banned_strategies.extend(structure_bans["banned_strategies"])
     if overrides["ban_naked_short"]:
         banned_strategies.extend(["naked_call", "naked_put"])
 
@@ -715,6 +832,8 @@ def _rule_parse_text_to_intent(text: str, underlying_id: str = "510300") -> Inte
         require_positive_theta=overrides["require_positive_theta"],
         prefer_income_family=overrides["prefer_income_family"],
         ban_naked_short=overrides["ban_naked_short"],
+        no_calendar=structure_bans["no_calendar"],
+        no_diagonal=structure_bans["no_diagonal"],
         prefer_directional_backup=overrides["prefer_directional_backup"],
         prefer_neutral_structure=overrides["prefer_neutral_structure"],
         range_bias=overrides["range_bias"],
@@ -918,6 +1037,8 @@ def run_advisor(
                         "require_positive_theta": uid_intent.require_positive_theta,
                         "prefer_income_family": uid_intent.prefer_income_family,
                         "ban_naked_short": uid_intent.ban_naked_short,
+                        "no_calendar": uid_intent.no_calendar,
+                        "no_diagonal": uid_intent.no_diagonal,
                         "prefer_directional_backup": uid_intent.prefer_directional_backup,
                         "prefer_neutral_structure": uid_intent.prefer_neutral_structure,
                         "range_bias": uid_intent.range_bias,

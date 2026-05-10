@@ -232,6 +232,141 @@ def _strategy_family_for_type(strategy_type: str) -> StrategyFamily:
     return _STRATEGY_FAMILY_MAP.get(strategy_type, "vertical")
 
 
+def _text_has_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _hard_filter_reason_code(
+    intent: IntentSpec,
+    strategy_type: str,
+    allowed: set[str],
+    blocked: set[str],
+) -> Optional[str]:
+    if allowed and strategy_type not in allowed:
+        return "outside_allowed_strategies"
+    if strategy_type not in blocked:
+        return None
+    if strategy_type in _FAMILY_STRATEGY_TYPES["naked_short"]:
+        if intent.defined_risk_only:
+            return "blocked_naked_short_by_defined_risk"
+        if getattr(intent, "ban_naked_short", False):
+            return "blocked_naked_short_by_no_naked_short"
+        if intent.risk_preference == "low":
+            return "blocked_naked_short_by_low_risk"
+        return "blocked_naked_short_by_text"
+    if strategy_type in set(intent.banned_strategies or []):
+        return "blocked_by_banned_strategies"
+    if strategy_type in _FAMILY_STRATEGY_TYPES["calendar"]:
+        return "blocked_calendar_by_text_or_ban"
+    if strategy_type in _FAMILY_STRATEGY_TYPES["diagonal"]:
+        return "blocked_diagonal_by_text_or_ban"
+    return "blocked_by_hard_filter"
+
+
+def _hard_filter_blocked_strategy_types(intent: IntentSpec) -> set[str]:
+    blocked = set(intent.banned_strategies or [])
+    raw_text = (getattr(intent, "raw_text", None) or "").lower()
+    no_naked_short_text = _text_has_any(
+        raw_text,
+        (
+            "不想裸卖",
+            "不要裸卖",
+            "不做裸卖",
+            "不裸卖",
+            "no naked",
+            "no naked short",
+            "not naked",
+        ),
+    )
+
+    if (
+        intent.defined_risk_only
+        or getattr(intent, "ban_naked_short", False)
+        or intent.risk_preference == "low"
+        or no_naked_short_text
+    ):
+        blocked.update(_FAMILY_STRATEGY_TYPES["naked_short"])
+
+    if _text_has_any(
+        raw_text,
+        (
+            "不做跨期",
+            "不要跨期",
+            "不做日历",
+            "不要日历",
+            "不做calendar",
+            "不要calendar",
+            "no calendar",
+            "not calendar",
+        ),
+    ):
+        blocked.update(_FAMILY_STRATEGY_TYPES["calendar"])
+    if _text_has_any(
+        raw_text,
+        (
+            "不做diagonal",
+            "不要diagonal",
+            "不做 diagonal",
+            "不要 diagonal",
+            "不做对角",
+            "不要对角",
+            "no diagonal",
+            "not diagonal",
+        ),
+    ):
+        blocked.update(_FAMILY_STRATEGY_TYPES["diagonal"])
+
+    return blocked
+
+
+def apply_hard_filters(intent: IntentSpec, strategies: List[StrategySpec]) -> List[StrategySpec]:
+    """Apply user hard constraints after all compiler fallbacks/backfills."""
+    allowed = set(intent.allowed_strategies or [])
+    blocked = _hard_filter_blocked_strategy_types(intent)
+
+    kept: List[tuple[StrategySpec, str]] = []
+    removed: List[Dict[str, str]] = []
+
+    for strategy in strategies:
+        strategy_type = strategy.strategy_type
+        reason_code = _hard_filter_reason_code(intent, strategy_type, allowed, blocked)
+
+        if reason_code is not None:
+            removed.append({"strategy_type": strategy_type, "reason_code": reason_code})
+            continue
+
+        kept.append((strategy, strategy_type))
+
+    reason_codes = sorted({item["reason_code"] for item in removed})
+    filtered_any = bool(removed)
+    skipped_reason = None
+    if not filtered_any:
+        skipped_reason = "no_blocked_strategy_generated" if blocked or allowed else "no_hard_constraints"
+    filtered: List[StrategySpec] = []
+    for strategy, _strategy_type in kept:
+        strategy.metadata = strategy.metadata or {}
+        strategy.metadata["hard_filter"] = {
+            "applied": True,
+            "filtered_any": filtered_any,
+            "skipped_reason": skipped_reason,
+            "allowed_strategies": sorted(allowed),
+            "blocked_strategies": sorted(blocked),
+            "filtered_strategies": removed,
+            "reason_codes": reason_codes,
+        }
+        filtered.append(strategy)
+
+    if removed:
+        print(
+            "[hard_filter] "
+            f"uid={intent.underlying_id} "
+            f"kept={len(filtered)} filtered_strategies={removed} "
+            f"reason_codes={reason_codes}"
+        )
+
+    return filtered
+
+
 def _default_opportunity_for_family(family: StrategyFamily) -> OpportunityType:
     mapping: Dict[StrategyFamily, OpportunityType] = {
         "vertical": "directional_defined_risk",
@@ -2152,4 +2287,20 @@ def compile_intent_to_strategies(
         f"vertical_presence={_vertical_presence(final_types)}"
     )
 
-    return specs
+    filtered_specs = apply_hard_filters(intent, specs)
+    if len(filtered_specs) != len(specs):
+        filtered_types = [spec.strategy_type for spec in filtered_specs]
+        _family_diag_log(
+            intent.underlying_id,
+            "final_specs_after_hard_filter",
+            **_family_diag_presence(filtered_types),
+        )
+        print(
+            "[vertical_trace] "
+            f"uid={intent.underlying_id} "
+            "stage=final_specs_after_hard_filter "
+            f"types={filtered_types} "
+            f"vertical_presence={_vertical_presence(filtered_types)}"
+        )
+
+    return filtered_specs

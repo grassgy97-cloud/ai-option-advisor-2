@@ -67,11 +67,13 @@ SYSTEM_PROMPT = """你是一个 A 股 ETF 期权交易意图解析器。
   - 偏多 / 偏空 / 看多 / 看空 -> 0.65
   - 强烈看多 / 强烈看空 / 明显看多 / 明显看空 -> 0.90
 - horizon_views:
-  - 只在用户明确区分短期/近期/近月/本周/未来几天 与 中期/后续/未来一个月/一两个月/中远期时填写
-  - 最多包含 short_term 和 medium_term，不要输出 long_term
-  - 每个 horizon 使用 {"direction": "bullish|bearish|neutral|unknown", "direction_strength": 0.0-1.0, "vol_bias": "up|down|flat|unknown"}
+  - 只在用户明确区分短期/近期/近月/本周/未来几天、中期/后续/未来一个月/一两个月/中远期、长期/长线/远期/政策支撑时填写
+  - 可包含 short_term / medium_term / long_term；不要用 long_term 覆盖 medium_term 的交易方向
+  - 每个 horizon 使用 {"direction": "bullish|bearish|neutral|unknown|upside_risk|recovery", "direction_strength": 0.0-1.0, "vol_bias": "up|down|flat|unknown"}
   - “短期偏空，中期不悲观” -> short_term.direction=bearish, medium_term.direction=neutral
   - “近期波动抬头，中期回落” -> short_term.vol_bias=up, medium_term.vol_bias=down
+  - “短期可能上冲，但中期偏空” -> short_term.direction=upside_risk, medium_term.direction=bearish
+  - “中期偏空，但长期看好” -> medium_term.direction=bearish, long_term.direction=bullish
 - vol_view_detail:
   - 只在用户明确表达更细波动率观点时填写，否则为 null
   - 支持 atm/call/put/skew/term 五个槽位，可部分填写

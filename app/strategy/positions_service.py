@@ -3,10 +3,16 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from app.models.schemas import PositionLegRecord, PositionLegUpsertRequest, PositionLegUpsertResponse
+from app.models.schemas import (
+    PositionLegRecord,
+    PositionLegUpsertRequest,
+    PositionLegUpsertResponse,
+    UnderlyingPositionRecord,
+)
 
 
 def _row_to_leg(row: Any) -> PositionLegRecord:
@@ -279,6 +285,57 @@ def list_position_legs(
             params,
         ).mappings().all()
     return [_row_to_leg(row) for row in rows]
+
+
+def list_underlying_positions(
+    engine: Engine,
+    underlying_id: Optional[str] = None,
+    status: Optional[str] = "OPEN",
+) -> list[UnderlyingPositionRecord]:
+    where = []
+    params: dict[str, Any] = {}
+    if underlying_id:
+        where.append("underlying_id = :underlying_id")
+        params["underlying_id"] = underlying_id
+    if status:
+        where.append("status = :status")
+        params["status"] = status
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"""
+                    SELECT
+                        underlying_id,
+                        shares,
+                        avg_entry_price,
+                        status,
+                        tag,
+                        note,
+                        include_in_portfolio_greeks
+                    FROM underlying_positions
+                    {where_sql}
+                    ORDER BY underlying_id
+                    """
+                ),
+                params,
+            ).mappings().all()
+    except SQLAlchemyError:
+        return []
+
+    return [
+        UnderlyingPositionRecord(
+            underlying_id=str(row["underlying_id"]),
+            shares=int(row["shares"]),
+            avg_entry_price=float(row["avg_entry_price"]),
+            status=str(row["status"]),
+            tag=row.get("tag"),
+            note=row.get("note"),
+            include_in_portfolio_greeks=bool(row.get("include_in_portfolio_greeks", True)),
+        )
+        for row in rows
+    ]
 
 
 def delete_position_leg(engine: Engine, leg_id: int) -> dict[str, Any]:

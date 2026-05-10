@@ -120,6 +120,8 @@ class IntentSpec(BaseModel):
     require_positive_theta: bool = False
     prefer_income_family: bool = False
     ban_naked_short: bool = False
+    no_calendar: bool = False
+    no_diagonal: bool = False
     prefer_directional_backup: bool = False
     prefer_neutral_structure: bool = False
     range_bias: Optional[str] = None
@@ -324,6 +326,16 @@ class PositionLegRecord(BaseModel):
     note: Optional[str] = None
 
 
+class UnderlyingPositionRecord(BaseModel):
+    underlying_id: str
+    shares: int
+    avg_entry_price: float
+    status: str = "OPEN"
+    tag: Optional[str] = None
+    note: Optional[str] = None
+    include_in_portfolio_greeks: bool = True
+
+
 class PositionLegUpsertResponse(BaseModel):
     leg: PositionLegRecord
     trade: Dict[str, Any]
@@ -335,6 +347,16 @@ class UnderlyingMonitorResponse(BaseModel):
     monitored_legs: List[Dict[str, Any]] = Field(default_factory=list)
     risk_contributors: List[Dict[str, Any]] = Field(default_factory=list)
     hedge_suggestions: List[Dict[str, Any]] = Field(default_factory=list)
+    portfolio_risk_summary: Dict[str, Any] = Field(default_factory=dict)
+    group_risk_breakdown: List[Dict[str, Any]] = Field(default_factory=list)
+    expiry_risk_breakdown: List[Dict[str, Any]] = Field(default_factory=list)
+    short_strike_risk_map: List[Dict[str, Any]] = Field(default_factory=list)
+    management_suggestions: List[Dict[str, Any]] = Field(default_factory=list)
+    underlying_position_summary: Dict[str, Any] = Field(default_factory=dict)
+    covered_call_coverage: List[Dict[str, Any]] = Field(default_factory=list)
+    covered_ratio: Optional[float] = None
+    uncovered_short_call_contracts: float = 0.0
+    covered_call_risk_status: Optional[str] = None
     llm_commentary: Optional[Dict[str, Any]] = None
     monitoring_llm_commentary: Optional[Dict[str, Any]] = None
 

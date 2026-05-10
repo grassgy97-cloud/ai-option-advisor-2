@@ -13,7 +13,7 @@ from app.models.schemas import (
     PositionMonitorResponse,
     UnderlyingMonitorResponse,
 )
-from app.strategy.positions_service import list_position_legs
+from app.strategy.positions_service import list_position_legs, list_underlying_positions
 from app.strategy.strategy_resolver import load_market_snapshot
 
 
@@ -54,6 +54,431 @@ def _quote_mid(row: Dict[str, Any]) -> Optional[float]:
     if bid is not None and ask is not None:
         return (bid + ask) / 2
     return _safe_float(row.get("option_market_price"))
+
+
+def _leg_greek_contribution(side: str, greek_value: float, quantity: int) -> float:
+    greek_sign = 1.0 if side == "BUY" else -1.0
+    return greek_sign * float(greek_value or 0.0) * int(quantity or 0)
+
+
+def _risk_greeks_from_raw(
+    net_delta: float,
+    net_gamma: float,
+    net_theta: float,
+    net_vega: float,
+    spot: float,
+) -> Dict[str, Any]:
+    gamma_rmb_per_1pct_move = None
+    if spot > 0:
+        move = spot * 0.01
+        gamma_rmb_per_1pct_move = 0.5 * net_gamma * move * move * CONTRACT_MULTIPLIER
+    return {
+        "contract_multiplier": CONTRACT_MULTIPLIER,
+        "delta_share_equiv": round(net_delta * CONTRACT_MULTIPLIER, 2),
+        "delta_rmb_per_1pct": round(net_delta * CONTRACT_MULTIPLIER * spot * 0.01, 2),
+        "theta_rmb_per_day": round(net_theta * CONTRACT_MULTIPLIER, 2),
+        "vega_rmb_per_1vol": round(net_vega * CONTRACT_MULTIPLIER * 0.01, 2),
+        "gamma_rmb_per_1pct_move": round(gamma_rmb_per_1pct_move, 2) if gamma_rmb_per_1pct_move is not None else None,
+        "gamma_rmb_per_1pct_move_approximate": gamma_rmb_per_1pct_move is not None,
+    }
+
+
+def _distance_risk_status(distance_pct: Optional[float]) -> str:
+    if distance_pct is None:
+        return "normal"
+    if distance_pct <= 0.01:
+        return "alert"
+    if distance_pct <= 0.03:
+        return "watch"
+    return "normal"
+
+
+def _expiry_risk_status(min_dte: Optional[int], net_gamma: float) -> tuple[str, int, str]:
+    score = 0
+    if min_dte is not None:
+        if min_dte <= 3:
+            score += 3
+        elif min_dte <= 7:
+            score += 2
+        elif min_dte <= 14:
+            score += 1
+    if net_gamma <= -2.0:
+        score += 3
+    elif net_gamma <= -1.0:
+        score += 2
+    elif net_gamma < 0:
+        score += 1
+
+    if score >= 4:
+        return "alert", score, "near_expiry_short_gamma"
+    if score >= 2:
+        return "watch", score, "expiry_gamma_watch"
+    return "normal", score, "expiry_risk_normal"
+
+
+def _coverage_status(covered_ratio: float) -> str:
+    if covered_ratio >= 1.0:
+        return "covered"
+    if covered_ratio > 0:
+        return "partially_covered"
+    return "uncovered"
+
+
+def _underlying_summary_from_positions(
+    positions: list[Any],
+    spot: float,
+) -> Dict[str, Any]:
+    active = [
+        pos
+        for pos in positions
+        if getattr(pos, "include_in_portfolio_greeks", True)
+        and str(getattr(pos, "status", "OPEN")).upper() == "OPEN"
+        and int(getattr(pos, "shares", 0) or 0) > 0
+    ]
+    shares = sum(int(getattr(pos, "shares", 0) or 0) for pos in active)
+    entry_value = sum(
+        int(getattr(pos, "shares", 0) or 0) * float(getattr(pos, "avg_entry_price", 0.0) or 0.0)
+        for pos in active
+    )
+    avg_entry = entry_value / shares if shares > 0 else None
+    pnl_estimate = (spot - avg_entry) * shares if avg_entry is not None else 0.0
+    return {
+        "underlying_position_count": len(active),
+        "shares": shares,
+        "avg_entry_price": round(avg_entry, 6) if avg_entry is not None else None,
+        "spot": round(spot, 4),
+        "pnl_estimate_rmb": round(pnl_estimate, 2),
+        "include_in_portfolio_greeks": bool(active),
+        "delta_share_equiv": shares,
+        "delta_rmb_per_1pct": round(shares * spot * 0.01, 2),
+        "theta_rmb_per_day": 0.0,
+        "vega_rmb_per_1vol": 0.0,
+        "gamma_rmb_per_1pct_move": 0.0,
+    }
+
+
+def _underlying_risk_leg(summary: Dict[str, Any]) -> Optional[dict[str, Any]]:
+    shares = int(summary.get("shares") or 0)
+    if shares <= 0:
+        return None
+    return {
+        "leg_id": None,
+        "contract_id": "UNDERLYING_SHARES",
+        "side": "BUY",
+        "option_type": "UNDERLYING",
+        "strike": None,
+        "expiry_date": "underlying",
+        "quantity": shares,
+        "pnl_estimate_rmb": summary.get("pnl_estimate_rmb") or 0.0,
+        "delta_contribution": shares / CONTRACT_MULTIPLIER,
+        "gamma_contribution": 0.0,
+        "theta_contribution": 0.0,
+        "vega_contribution": 0.0,
+        "dte": None,
+        "strategy_bucket": "underlying_position",
+        "group_id": "underlying_position",
+        "tag": "underlying_shares",
+    }
+
+
+def _build_covered_call_coverage(
+    option_legs: list[dict[str, Any]],
+    underlying_shares: int,
+) -> Dict[str, Any]:
+    short_calls = [
+        leg
+        for leg in option_legs
+        if leg.get("side") == "SELL"
+        and str(leg.get("option_type") or "").upper() in ("CALL", "C")
+    ]
+    total_short_contracts = sum(int(leg.get("quantity") or 0) for leg in short_calls)
+    required_shares = total_short_contracts * CONTRACT_MULTIPLIER
+    covered_ratio = underlying_shares / required_shares if required_shares > 0 else None
+    uncovered_contracts = 0.0
+    if required_shares > 0:
+        uncovered_shares = max(required_shares - underlying_shares, 0)
+        uncovered_contracts = uncovered_shares / CONTRACT_MULTIPLIER
+    aggregate_status = _coverage_status(float(covered_ratio or 0.0)) if required_shares > 0 else "no_short_call"
+
+    rows: list[dict[str, Any]] = []
+    remaining_shares = max(underlying_shares, 0)
+    for leg in sorted(short_calls, key=lambda item: (item.get("expiry_date") or "", float(item.get("strike") or 0.0))):
+        contracts = int(leg.get("quantity") or 0)
+        required = contracts * CONTRACT_MULTIPLIER
+        covered_shares = min(remaining_shares, required)
+        leg_ratio = covered_shares / required if required > 0 else 0.0
+        remaining_shares -= covered_shares
+        rows.append({
+            "leg_id": leg.get("leg_id"),
+            "contract_id": leg.get("contract_id"),
+            "strategy_bucket": leg.get("strategy_bucket"),
+            "group_id": leg.get("group_id"),
+            "strike": leg.get("strike"),
+            "expiry_date": leg.get("expiry_date"),
+            "short_call_contracts": contracts,
+            "required_shares": required,
+            "covered_shares": covered_shares,
+            "covered_ratio": round(leg_ratio, 4),
+            "uncovered_short_call_contracts": round(max(required - covered_shares, 0) / CONTRACT_MULTIPLIER, 4),
+            "coverage_status": _coverage_status(leg_ratio),
+        })
+
+    return {
+        "rows": rows,
+        "covered_ratio": round(covered_ratio, 4) if covered_ratio is not None else None,
+        "uncovered_short_call_contracts": round(uncovered_contracts, 4),
+        "covered_call_risk_status": aggregate_status,
+        "underlying_shares": underlying_shares,
+        "short_call_contracts": total_short_contracts,
+        "required_shares": required_shares,
+    }
+
+
+def _aggregate_leg_risk(
+    legs: list[dict[str, Any]],
+    spot: float,
+    key_name: str,
+) -> list[dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for leg in legs:
+        if key_name == "strategy_group":
+            key = str(leg.get("group_id") or leg.get("strategy_bucket") or "ungrouped")
+        else:
+            key = str(leg.get(key_name) or "ungrouped")
+        item = grouped.setdefault(
+            key,
+            {
+                key_name: key,
+                "leg_count": 0,
+                "short_leg_count": 0,
+                "pnl_estimate_rmb": 0.0,
+                "net_delta": 0.0,
+                "net_gamma": 0.0,
+                "net_theta": 0.0,
+                "net_vega": 0.0,
+                "min_dte": None,
+            },
+        )
+        item["leg_count"] += 1
+        if leg.get("side") == "SELL":
+            item["short_leg_count"] += 1
+        item["pnl_estimate_rmb"] += float(leg.get("pnl_estimate_rmb") or 0.0)
+        item["net_delta"] += float(leg.get("delta_contribution") or 0.0)
+        item["net_gamma"] += float(leg.get("gamma_contribution") or 0.0)
+        item["net_theta"] += float(leg.get("theta_contribution") or 0.0)
+        item["net_vega"] += float(leg.get("vega_contribution") or 0.0)
+        dte = leg.get("dte")
+        if dte is not None:
+            dte = int(dte)
+            item["min_dte"] = dte if item["min_dte"] is None else min(item["min_dte"], dte)
+
+    output: list[dict[str, Any]] = []
+    for item in grouped.values():
+        risk_greeks = _risk_greeks_from_raw(
+            item["net_delta"],
+            item["net_gamma"],
+            item["net_theta"],
+            item["net_vega"],
+            spot,
+        )
+        expiry_status, expiry_score, reason_code = _expiry_risk_status(item["min_dte"], item["net_gamma"])
+        output.append({
+            **item,
+            "group_id": item.get("strategy_group") if key_name == "strategy_group" else item.get("group_id"),
+            "pnl_estimate_rmb": round(item["pnl_estimate_rmb"], 2),
+            "net_delta": round(item["net_delta"], 6),
+            "net_gamma": round(item["net_gamma"], 6),
+            "net_theta": round(item["net_theta"], 6),
+            "net_vega": round(item["net_vega"], 6),
+            **risk_greeks,
+            "expiry_risk_status": expiry_status,
+            "expiry_risk_score": expiry_score,
+            "reason_code": reason_code,
+        })
+    return sorted(output, key=lambda x: (-x["expiry_risk_score"], str(x.get(key_name))))
+
+
+def _build_short_strike_risk_map(
+    legs: list[dict[str, Any]],
+    spot: float,
+    covered_call_coverage: Optional[Dict[str, Any]] = None,
+) -> list[dict[str, Any]]:
+    coverage_by_leg = {
+        row.get("leg_id"): row
+        for row in (covered_call_coverage or {}).get("rows", [])
+        if row.get("leg_id") is not None
+    }
+    risks: list[dict[str, Any]] = []
+    for leg in legs:
+        if leg.get("side") != "SELL":
+            continue
+        option_type = str(leg.get("option_type") or "").upper()
+        if option_type not in ("CALL", "PUT", "C", "P"):
+            continue
+        strike = _safe_float(leg.get("strike"))
+        if strike is None or spot <= 0:
+            continue
+        distance_pct = abs(strike - spot) / spot
+        status = _distance_risk_status(distance_pct)
+        coverage = coverage_by_leg.get(leg.get("leg_id"), {})
+        is_short_call = option_type in ("CALL", "C")
+        row = {
+            "leg_id": leg.get("leg_id"),
+            "contract_id": leg.get("contract_id"),
+            "option_type": option_type,
+            "strike": strike,
+            "expiry_date": leg.get("expiry_date"),
+            "dte": leg.get("dte"),
+            "group_id": leg.get("group_id"),
+            "strategy_bucket": leg.get("strategy_bucket"),
+            "delta_contribution": leg.get("delta_contribution"),
+            "gamma_contribution": leg.get("gamma_contribution"),
+            "distance_to_short_strike": round(distance_pct, 6),
+            "status": status,
+            "reason_code": f"short_strike_distance_{status}",
+        }
+        if is_short_call and coverage:
+            row.update({
+                "covered_ratio": coverage.get("covered_ratio"),
+                "coverage_status": coverage.get("coverage_status"),
+                "uncovered_short_call_contracts": coverage.get("uncovered_short_call_contracts"),
+                "covered_call_risk_status": coverage.get("coverage_status"),
+                "assignment_risk": status in ("alert", "watch"),
+                "assignment_risk_note": (
+                    "spot_near_short_call_strike_review_assignment_roll_or_accept_delivery"
+                    if status in ("alert", "watch")
+                    else None
+                ),
+            })
+        risks.append(row)
+    return sorted(risks, key=lambda x: (x["distance_to_short_strike"], x.get("dte") if x.get("dte") is not None else 999999))
+
+
+def _build_management_suggestions(
+    portfolio_summary: dict[str, Any],
+    group_breakdown: list[dict[str, Any]],
+    expiry_breakdown: list[dict[str, Any]],
+    short_strike_map: list[dict[str, Any]],
+    pnl_pct: Optional[float],
+) -> list[dict[str, Any]]:
+    suggestions: list[dict[str, Any]] = []
+    largest_delta_group = max(group_breakdown, key=lambda g: abs(float(g.get("net_delta") or 0.0)), default={})
+
+    if abs(float(portfolio_summary.get("net_delta") or 0.0)) >= 1.0:
+        suggestions.append({
+            "goal": "reduce_delta",
+            "trigger": f"net_delta={portfolio_summary.get('net_delta')}",
+            "suggested_action": "review directional exposure and reduce delta concentration if it no longer matches the plan",
+            "related_group_id": largest_delta_group.get("group_id") or largest_delta_group.get("strategy_bucket"),
+            "reason_code": "portfolio_delta_high",
+        })
+
+    alert_short = next((item for item in short_strike_map if item["status"] == "alert"), None)
+    alert_expiry = next((item for item in expiry_breakdown if item["expiry_risk_status"] == "alert"), None)
+    covered_call_alert = next(
+        (
+            item
+            for item in short_strike_map
+            if item.get("option_type") in ("CALL", "C")
+            and item.get("coverage_status") in ("covered", "partially_covered")
+            and item.get("status") in ("alert", "watch")
+        ),
+        None,
+    )
+    if covered_call_alert:
+        suggestions.append({
+            "goal": "take_profit_or_roll",
+            "trigger": "covered short call is close to strike",
+            "suggested_action": "review assignment risk, whether to roll up/out, or whether accepting delivery is intended",
+            "related_leg_id": covered_call_alert.get("leg_id"),
+            "related_group_id": covered_call_alert.get("group_id"),
+            "reason_code": "covered_call_assignment_or_roll_watch",
+        })
+    if alert_short or alert_expiry:
+        suggestions.append({
+            "goal": "reduce_gamma",
+            "trigger": "short strike is close or near-expiry short gamma is elevated",
+            "suggested_action": "review whether gamma exposure should be reduced or rolled before expiry pressure increases",
+            "related_leg_id": alert_short.get("leg_id") if alert_short else None,
+            "related_group_id": alert_expiry.get("expiry_date") if alert_expiry else None,
+            "reason_code": "short_gamma_or_short_strike_alert",
+        })
+
+    if abs(float(portfolio_summary.get("net_vega") or 0.0)) >= 0.10:
+        suggestions.append({
+            "goal": "reduce_vega",
+            "trigger": f"net_vega={portfolio_summary.get('net_vega')}",
+            "suggested_action": "review volatility exposure and avoid unintended concentration in one vol direction",
+            "related_group_id": largest_delta_group.get("group_id") or largest_delta_group.get("strategy_bucket"),
+            "reason_code": "portfolio_vega_exposure_high",
+        })
+
+    watch_expiry = next((item for item in expiry_breakdown if item["expiry_risk_status"] in ("alert", "watch")), None)
+    if (pnl_pct is not None and pnl_pct >= 0.50) or watch_expiry:
+        suggestions.append({
+            "goal": "take_profit_or_roll",
+            "trigger": f"pnl_pct={round(pnl_pct, 4) if pnl_pct is not None else None}, expiry_risk={watch_expiry.get('expiry_risk_status') if watch_expiry else None}",
+            "suggested_action": "review whether to take profit, reduce size, or roll before expiry risk dominates",
+            "related_group_id": watch_expiry.get("expiry_date") if watch_expiry else None,
+            "reason_code": "profit_or_expiry_roll_watch",
+        })
+
+    if not suggestions:
+        suggestions.append({
+            "goal": "hold_and_watch",
+            "trigger": "no major portfolio risk threshold triggered",
+            "suggested_action": "continue monitoring spot distance, DTE, Greeks, and liquidity",
+            "related_group_id": None,
+            "reason_code": "no_action_threshold_triggered",
+        })
+    return suggestions
+
+
+def _build_underlying_monitor_v2(
+    *,
+    spot: float,
+    monitored_legs: list[dict[str, Any]],
+    total_pnl: float,
+    pnl_pct: Optional[float],
+    net_delta: float,
+    net_gamma: float,
+    net_theta: float,
+    net_vega: float,
+    covered_call_coverage: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    total_risk_greeks = _risk_greeks_from_raw(net_delta, net_gamma, net_theta, net_vega, spot)
+    portfolio_risk_summary = {
+        "spot": round(spot, 4),
+        "monitored_leg_count": len(monitored_legs),
+        "pnl_estimate": round(total_pnl, 2),
+        "pnl_pct_of_entry_premium": round(pnl_pct, 4) if pnl_pct is not None else None,
+        "net_delta": round(net_delta, 6),
+        "net_gamma": round(net_gamma, 6),
+        "net_theta": round(net_theta, 6),
+        "net_vega": round(net_vega, 6),
+        "total_risk_greeks": total_risk_greeks,
+    }
+    group_breakdown = _aggregate_leg_risk(monitored_legs, spot, "strategy_group")
+    expiry_breakdown = _aggregate_leg_risk(monitored_legs, spot, "expiry_date")
+    short_strike_map = _build_short_strike_risk_map(monitored_legs, spot, covered_call_coverage)
+    most_dangerous_legs = short_strike_map[:5]
+    portfolio_risk_summary["most_dangerous_legs"] = most_dangerous_legs
+    portfolio_risk_summary["distance_to_short_strike"] = most_dangerous_legs[0] if most_dangerous_legs else None
+    portfolio_risk_summary["expiry_risk"] = expiry_breakdown[0] if expiry_breakdown else None
+
+    return {
+        "portfolio_risk_summary": portfolio_risk_summary,
+        "group_risk_breakdown": group_breakdown,
+        "expiry_risk_breakdown": expiry_breakdown,
+        "short_strike_risk_map": short_strike_map,
+        "management_suggestions": _build_management_suggestions(
+            portfolio_risk_summary,
+            group_breakdown,
+            expiry_breakdown,
+            short_strike_map,
+            pnl_pct,
+        ),
+    }
 
 
 def _find_current_quote(snapshot: Any, leg: PositionLegInput) -> Optional[Dict[str, Any]]:
@@ -241,6 +666,7 @@ def monitor_position(engine: Engine, position: PositionMonitorRequest) -> Positi
 
     status = _status_from_flags(risk_flags)
     action = _recommended_action(status, pnl_pct, pricing_type)
+    risk_greeks = _risk_greeks_from_raw(net_delta, net_gamma, net_theta, net_vega, spot)
 
     summary = {
         "status": status,
@@ -254,6 +680,7 @@ def monitor_position(engine: Engine, position: PositionMonitorRequest) -> Positi
         "net_gamma": round(net_gamma, 6),
         "net_theta": round(net_theta, 6),
         "net_vega": round(net_vega, 6),
+        **risk_greeks,
         "dte": min_dte,
         "risk_flags": risk_flags,
         "recommended_action": action,
@@ -291,8 +718,11 @@ def monitor_underlying_positions(engine: Engine, underlying_id: str) -> Underlyi
         for leg in list_position_legs(engine, underlying_id=underlying_id, status="OPEN")
         if leg.include_in_portfolio_greeks and int(leg.quantity or 0) > 0
     ]
+    underlying_positions = list_underlying_positions(engine, underlying_id=underlying_id, status="OPEN")
     snapshot = load_market_snapshot(engine, underlying_id)
     spot = float(snapshot.spot)
+    underlying_position_summary = _underlying_summary_from_positions(underlying_positions, spot)
+    underlying_risk_leg = _underlying_risk_leg(underlying_position_summary)
 
     monitored_legs: list[dict[str, Any]] = []
     risk_contributors: list[dict[str, Any]] = []
@@ -306,6 +736,13 @@ def monitor_underlying_positions(engine: Engine, underlying_id: str) -> Underlyi
     net_vega = 0.0
     min_dte: Optional[int] = None
     short_distances: list[float] = []
+    if underlying_risk_leg is not None:
+        net_delta += float(underlying_risk_leg["delta_contribution"])
+        total_pnl += float(underlying_position_summary.get("pnl_estimate_rmb") or 0.0)
+        avg_entry = underlying_position_summary.get("avg_entry_price")
+        shares = int(underlying_position_summary.get("shares") or 0)
+        if avg_entry is not None:
+            total_entry_abs += abs(float(avg_entry)) * shares
 
     for leg in position_legs:
         leg_input = PositionLegInput(
@@ -334,7 +771,6 @@ def monitor_underlying_positions(engine: Engine, underlying_id: str) -> Underlyi
             continue
 
         qty = int(leg.quantity or 0)
-        greek_sign = 1.0 if leg.side == "BUY" else -1.0
         entry = float(leg.avg_entry_price)
         leg_pnl = (
             (mid - entry) * qty * CONTRACT_MULTIPLIER
@@ -348,10 +784,17 @@ def monitor_underlying_positions(engine: Engine, underlying_id: str) -> Underlyi
         gamma = _safe_float(row.get("gamma"), 0.0) or 0.0
         theta = _safe_float(row.get("theta"), 0.0) or 0.0
         vega = _safe_float(row.get("vega"), 0.0) or 0.0
-        delta_contrib = greek_sign * delta * qty
-        gamma_contrib = greek_sign * gamma * qty
-        theta_contrib = greek_sign * theta * qty
-        vega_contrib = greek_sign * vega * qty
+        delta_contrib = _leg_greek_contribution(leg.side, delta, qty)
+        gamma_contrib = _leg_greek_contribution(leg.side, gamma, qty)
+        theta_contrib = _leg_greek_contribution(leg.side, theta, qty)
+        vega_contrib = _leg_greek_contribution(leg.side, vega, qty)
+        risk_greeks_contrib = _risk_greeks_from_raw(
+            delta_contrib,
+            gamma_contrib,
+            theta_contrib,
+            vega_contrib,
+            spot,
+        )
         net_delta += delta_contrib
         net_gamma += gamma_contrib
         net_theta += theta_contrib
@@ -422,6 +865,12 @@ def monitor_underlying_positions(engine: Engine, underlying_id: str) -> Underlyi
             "gamma_contribution": round(gamma_contrib, 6),
             "theta_contribution": round(theta_contrib, 6),
             "vega_contribution": round(vega_contrib, 6),
+            "delta_share_equiv": risk_greeks_contrib["delta_share_equiv"],
+            "delta_rmb_per_1pct": risk_greeks_contrib["delta_rmb_per_1pct"],
+            "theta_rmb_per_day": risk_greeks_contrib["theta_rmb_per_day"],
+            "vega_rmb_per_1vol": risk_greeks_contrib["vega_rmb_per_1vol"],
+            "gamma_rmb_per_1pct_move": risk_greeks_contrib["gamma_rmb_per_1pct_move"],
+            "gamma_rmb_per_1pct_move_approximate": risk_greeks_contrib["gamma_rmb_per_1pct_move_approximate"],
             "dte": dte,
             "distance_to_spot_pct": round(distance_pct, 4) if distance_pct is not None else None,
             "strategy_bucket": leg.strategy_bucket,
@@ -450,6 +899,38 @@ def monitor_underlying_positions(engine: Engine, underlying_id: str) -> Underlyi
             risk_flags.append("spot_near_short_strike")
             notes.append("Spot is close to at least one short strike.")
 
+    covered_call_snapshot = _build_covered_call_coverage(
+        monitored_legs,
+        int(underlying_position_summary.get("shares") or 0),
+    )
+    covered_call_coverage = covered_call_snapshot["rows"]
+    covered_ratio = covered_call_snapshot["covered_ratio"]
+    uncovered_short_call_contracts = covered_call_snapshot["uncovered_short_call_contracts"]
+    covered_call_risk_status = covered_call_snapshot["covered_call_risk_status"]
+    coverage_by_leg = {
+        row.get("leg_id"): row
+        for row in covered_call_coverage
+        if row.get("leg_id") is not None
+    }
+    for contributor in risk_contributors:
+        coverage = coverage_by_leg.get(contributor.get("leg_id"))
+        if coverage and contributor.get("reason") == "spot_near_short_strike":
+            if coverage.get("coverage_status") in ("covered", "partially_covered"):
+                contributor["reason"] = "covered_call_assignment_risk"
+                contributor["suggested_action"] = "review_roll_up_out_or_accept_delivery"
+            elif coverage.get("coverage_status") == "uncovered":
+                contributor["reason"] = "uncovered_short_call_near_strike"
+                contributor["suggested_action"] = "reduce_or_cover_short_call"
+    if covered_call_snapshot["short_call_contracts"] > 0:
+        if covered_call_risk_status == "covered":
+            notes.append("Short call exposure is covered by ETF shares; monitor assignment and capped-upside risk near strike.")
+        elif covered_call_risk_status == "partially_covered":
+            risk_flags.append("covered_call_partially_covered")
+            notes.append("Short call exposure is only partially covered by ETF shares.")
+        elif covered_call_risk_status == "uncovered":
+            risk_flags.append("short_call_uncovered")
+            notes.append("Some short call exposure is not covered by ETF shares.")
+
     if abs(net_delta) >= 1.0:
         risk_flags.append("portfolio_delta_high")
         notes.append("Portfolio net delta is high for this underlying.")
@@ -469,6 +950,7 @@ def monitor_underlying_positions(engine: Engine, underlying_id: str) -> Underlyi
     pnl_pct = total_pnl / total_entry_abs if total_entry_abs > 0 else None
     status = _monitor_status(risk_flags)
     recommended_action = _monitor_action(status, pnl_pct)
+    risk_greeks = _risk_greeks_from_raw(net_delta, net_gamma, net_theta, net_vega, spot)
 
     hedge_suggestions: list[dict[str, str]] = []
     if net_delta <= -1.0:
@@ -496,17 +978,36 @@ def monitor_underlying_positions(engine: Engine, underlying_id: str) -> Underlyi
         "status": status,
         "spot": round(spot, 4),
         "monitored_leg_count": len(monitored_legs),
+        "underlying_shares": underlying_position_summary.get("shares", 0),
+        "covered_ratio": covered_ratio,
+        "uncovered_short_call_contracts": uncovered_short_call_contracts,
+        "covered_call_risk_status": covered_call_risk_status,
         "pnl_estimate": round(total_pnl, 2),
         "pnl_pct_of_entry_premium": round(pnl_pct, 4) if pnl_pct is not None else None,
         "net_delta": round(net_delta, 6),
         "net_gamma": round(net_gamma, 6),
         "net_theta": round(net_theta, 6),
         "net_vega": round(net_vega, 6),
+        **risk_greeks,
         "dte": min_dte,
         "risk_flags": sorted(set(risk_flags)),
         "recommended_action": recommended_action,
         "notes": notes,
     }
+    risk_legs_for_v2 = list(monitored_legs)
+    if underlying_risk_leg is not None:
+        risk_legs_for_v2.append(underlying_risk_leg)
+    monitor_v2 = _build_underlying_monitor_v2(
+        spot=spot,
+        monitored_legs=risk_legs_for_v2,
+        total_pnl=total_pnl,
+        pnl_pct=pnl_pct,
+        net_delta=net_delta,
+        net_gamma=net_gamma,
+        net_theta=net_theta,
+        net_vega=net_vega,
+        covered_call_coverage=covered_call_snapshot,
+    )
 
     with engine.begin() as conn:
         conn.execute(
@@ -546,4 +1047,14 @@ def monitor_underlying_positions(engine: Engine, underlying_id: str) -> Underlyi
         monitored_legs=monitored_legs,
         risk_contributors=risk_contributors,
         hedge_suggestions=hedge_suggestions,
+        portfolio_risk_summary=monitor_v2["portfolio_risk_summary"],
+        group_risk_breakdown=monitor_v2["group_risk_breakdown"],
+        expiry_risk_breakdown=monitor_v2["expiry_risk_breakdown"],
+        short_strike_risk_map=monitor_v2["short_strike_risk_map"],
+        management_suggestions=monitor_v2["management_suggestions"],
+        underlying_position_summary=underlying_position_summary,
+        covered_call_coverage=covered_call_coverage,
+        covered_ratio=covered_ratio,
+        uncovered_short_call_contracts=uncovered_short_call_contracts,
+        covered_call_risk_status=covered_call_risk_status,
     )

@@ -19,26 +19,41 @@ import time
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app.data.trading_calendar import ensure_manual_non_trading_days_table
+
 
 IV_PRIOR_RANGE: Dict[str, Dict[str, float]] = {
-    "510300": {"p10": 0.110, "p25": 0.135, "p50": 0.160, "p75": 0.200, "p90": 0.280, "p99": 0.480},
-    "510050": {"p10": 0.100, "p25": 0.125, "p50": 0.150, "p75": 0.190, "p90": 0.265, "p99": 0.460},
-    "510500": {"p10": 0.140, "p25": 0.170, "p50": 0.210, "p75": 0.260, "p90": 0.360, "p99": 0.600},
-    "588000": {"p10": 0.180, "p25": 0.220, "p50": 0.270, "p75": 0.340, "p90": 0.480, "p99": 0.750},
-    "159915": {"p10": 0.150, "p25": 0.185, "p50": 0.225, "p75": 0.290, "p90": 0.400, "p99": 0.650},
-    "159901": {"p10": 0.110, "p25": 0.135, "p50": 0.160, "p75": 0.200, "p90": 0.280, "p99": 0.480},
-    "159919": {"p10": 0.110, "p25": 0.135, "p50": 0.160, "p75": 0.200, "p90": 0.280, "p99": 0.480},
-    "159922": {"p10": 0.140, "p25": 0.170, "p50": 0.210, "p75": 0.260, "p90": 0.360, "p99": 0.600},
-    "588080": {"p10": 0.180, "p25": 0.220, "p50": 0.270, "p75": 0.340, "p90": 0.480, "p99": 0.750},
+    "510050": {"p10": 0.125, "p25": 0.136, "p50": 0.155, "p75": 0.185, "p90": 0.240, "p99": 0.400},
+    "510300": {"p10": 0.128, "p25": 0.140, "p50": 0.160, "p75": 0.190, "p90": 0.250, "p99": 0.410},
+    "159919": {"p10": 0.130, "p25": 0.142, "p50": 0.163, "p75": 0.195, "p90": 0.260, "p99": 0.430},
+    "510500": {"p10": 0.155, "p25": 0.170, "p50": 0.195, "p75": 0.230, "p90": 0.300, "p99": 0.500},
+    "159922": {"p10": 0.158, "p25": 0.173, "p50": 0.198, "p75": 0.230, "p90": 0.300, "p99": 0.480},
+    "159915": {"p10": 0.185, "p25": 0.215, "p50": 0.255, "p75": 0.300, "p90": 0.400, "p99": 0.650},
+    "159901": {"p10": 0.155, "p25": 0.170, "p50": 0.195, "p75": 0.230, "p90": 0.300, "p99": 0.450},
+    "588000": {"p10": 0.200, "p25": 0.240, "p50": 0.290, "p75": 0.340, "p90": 0.440, "p99": 0.720},
+    "588080": {"p10": 0.200, "p25": 0.240, "p50": 0.290, "p75": 0.340, "p90": 0.440, "p99": 0.740},
 }
 
 _DEFAULT_PRIOR = IV_PRIOR_RANGE["510300"]
 _MIN_VALID_IV = 0.01
 _MAX_VALID_IV = 2.0
 _MIN_DTE = 10
+DTE_BUCKETS: Dict[str, tuple[int, int]] = {
+    "near": (10, 35),
+    "mid": (36, 75),
+    "far": (76, 180),
+}
 _CALL_TARGET_ABS_DELTA = 0.40
 _PUT_TARGET_ABS_DELTA = 0.40
 _ATM_TARGET_ABS_DELTA = 0.50
+_SAMPLE_METHOD = "weekday_latest_snapshot_per_date_dte_bucket_then_delta_target"
+
+
+def _resolve_dte_bucket(dte_bucket: str) -> tuple[str, int, int, float]:
+    bucket = dte_bucket if dte_bucket in DTE_BUCKETS else "near"
+    dte_min, dte_max = DTE_BUCKETS[bucket]
+    target_dte = (dte_min + dte_max) / 2.0
+    return bucket, dte_min, dte_max, target_dte
 
 
 def _calc_prior_percentile(iv: float, prior: Dict[str, float]) -> float:
@@ -118,6 +133,11 @@ def _build_percentile_payload(
     underlying_id: str,
     historical_ivs: List[float],
     dimension: str,
+    dte_bucket: str = "near",
+    dte_min: Optional[int] = None,
+    dte_max: Optional[int] = None,
+    lookback_days: int = 270,
+    max_history_days: int = 180,
     min_history_days: int = 10,
 ) -> Dict[str, Any]:
     prior = IV_PRIOR_RANGE.get(underlying_id, _DEFAULT_PRIOR)
@@ -126,7 +146,7 @@ def _build_percentile_payload(
     n = len(historical_ivs)
     if n >= min_history_days:
         hist_pct = sum(1 for x in historical_ivs if x <= current_iv) / n
-        hist_weight = min(0.70, 0.30 + 0.40 * (n - min_history_days) / 50.0)
+        hist_weight = min(0.70, 0.15 + 0.55 * (n - min_history_days) / (180 - min_history_days))
     else:
         hist_pct = prior_pct
         hist_weight = 0.0
@@ -137,6 +157,12 @@ def _build_percentile_payload(
 
     return {
         "dimension": dimension,
+        "dte_bucket": dte_bucket,
+        "dte_min": dte_min,
+        "dte_max": dte_max,
+        "lookback_days": lookback_days,
+        "max_history_days": max_history_days,
+        "sample_method": _SAMPLE_METHOD,
         "current_iv": round(current_iv, 4),
         "composite_percentile": round(composite_pct, 3),
         "hist_percentile": round(hist_pct, 3),
@@ -154,24 +180,49 @@ def _build_percentile_payload(
 def _fetch_latest_snapshot_rows(
     engine: Engine,
     underlying_id: str,
-    min_dte: int = _MIN_DTE,
+    dte_bucket: str = "near",
 ) -> List[Dict[str, Any]]:
+    ensure_manual_non_trading_days_table(engine)
+    bucket, dte_min, dte_max, _ = _resolve_dte_bucket(dte_bucket)
     sql = text(
         """
-        WITH latest AS (
-            SELECT MAX(fetch_time) AS max_fetch_time
+        WITH eligible AS (
+            SELECT fetch_time
             FROM option_factor_snapshots
             WHERE underlying_id = :underlying_id
+              AND EXTRACT(ISODOW FROM fetch_time) BETWEEN 1 AND 5
+              AND delta IS NOT NULL
+              AND implied_vol IS NOT NULL
+              AND implied_vol > :min_valid_iv
+              AND implied_vol < :max_valid_iv
+              AND dte_calendar >= :dte_min
+              AND dte_calendar <= :dte_max
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM manual_non_trading_days nt
+                  WHERE nt.trade_date = DATE(fetch_time)
+              )
+        ),
+        latest AS (
+            SELECT MAX(fetch_time) AS max_fetch_time
+            FROM eligible
         )
         SELECT option_type, implied_vol, delta, dte_calendar, strike, fetch_time
         FROM option_factor_snapshots
         WHERE underlying_id = :underlying_id
           AND fetch_time = (SELECT max_fetch_time FROM latest)
+          AND EXTRACT(ISODOW FROM fetch_time) BETWEEN 1 AND 5
           AND delta IS NOT NULL
           AND implied_vol IS NOT NULL
           AND implied_vol > :min_valid_iv
           AND implied_vol < :max_valid_iv
-          AND dte_calendar > :min_dte
+          AND dte_calendar >= :dte_min
+          AND dte_calendar <= :dte_max
+          AND NOT EXISTS (
+              SELECT 1
+              FROM manual_non_trading_days nt
+              WHERE nt.trade_date = DATE(fetch_time)
+          )
         """
     )
     with engine.connect() as conn:
@@ -181,9 +232,12 @@ def _fetch_latest_snapshot_rows(
                 "underlying_id": underlying_id,
                 "min_valid_iv": _MIN_VALID_IV,
                 "max_valid_iv": _MAX_VALID_IV,
-                "min_dte": min_dte,
+                "dte_min": dte_min,
+                "dte_max": dte_max,
             },
         ).mappings().all()
+    if not rows:
+        print(f"[iv_percentile] uid={underlying_id} no_current_rows bucket={bucket}")
     return [dict(r) for r in rows]
 
 
@@ -191,6 +245,7 @@ def _choose_representative_iv(
     rows: List[Dict[str, Any]],
     option_side: str,
     abs_delta_target: float,
+    target_dte: Optional[float] = None,
 ) -> Optional[float]:
     if option_side == "CALL":
         candidates = [r for r in rows if str(r.get("option_type")).upper() in ("CALL", "C")]
@@ -205,7 +260,7 @@ def _choose_representative_iv(
     ordered = sorted(
         candidates,
         key=lambda r: (
-            int(r.get("dte_calendar") or 999999),
+            abs(float(r.get("dte_calendar") or 999999) - target_dte) if target_dte is not None else int(r.get("dte_calendar") or 999999),
             abs(abs(float(r.get("delta") or 0.0)) - abs_delta_target),
         ),
     )
@@ -213,16 +268,18 @@ def _choose_representative_iv(
     return float(iv) if iv is not None else None
 
 
-def get_current_representative_ivs(engine: Engine, underlying_id: str) -> Dict[str, Optional[float]]:
+def get_current_representative_ivs(
+    engine: Engine,
+    underlying_id: str,
+    dte_bucket: str = "near",
+) -> Dict[str, Optional[float]]:
     try:
-        rows = _fetch_latest_snapshot_rows(engine, underlying_id)
-        if not rows:
-            rows = _fetch_latest_snapshot_rows(engine, underlying_id, min_dte=0)
-            print(f"[iv_percentile] uid={underlying_id} relaxed_current_iv_dte_filter rows={len(rows)}")
-        current_call = _choose_representative_iv(rows, "CALL", _CALL_TARGET_ABS_DELTA)
-        current_put = _choose_representative_iv(rows, "PUT", _PUT_TARGET_ABS_DELTA)
-        atm_call = _choose_representative_iv(rows, "CALL", _ATM_TARGET_ABS_DELTA)
-        atm_put = _choose_representative_iv(rows, "PUT", _ATM_TARGET_ABS_DELTA)
+        _, _, _, target_dte = _resolve_dte_bucket(dte_bucket)
+        rows = _fetch_latest_snapshot_rows(engine, underlying_id, dte_bucket=dte_bucket)
+        current_call = _choose_representative_iv(rows, "CALL", _CALL_TARGET_ABS_DELTA, target_dte=target_dte)
+        current_put = _choose_representative_iv(rows, "PUT", _PUT_TARGET_ABS_DELTA, target_dte=target_dte)
+        atm_call = _choose_representative_iv(rows, "CALL", _ATM_TARGET_ABS_DELTA, target_dte=target_dte)
+        atm_put = _choose_representative_iv(rows, "PUT", _ATM_TARGET_ABS_DELTA, target_dte=target_dte)
 
         atm_values = [v for v in (atm_call, atm_put) if v is not None]
         current_atm = sum(atm_values) / len(atm_values) if atm_values else (current_call or current_put)
@@ -237,6 +294,23 @@ def get_current_representative_ivs(engine: Engine, underlying_id: str) -> Dict[s
         return {"atm": None, "call": None, "put": None}
 
 
+def _latest_snapshot_metadata(
+    engine: Engine,
+    underlying_id: str,
+    dte_bucket: str = "near",
+) -> Dict[str, Optional[str]]:
+    rows = _fetch_latest_snapshot_rows(engine, underlying_id, dte_bucket=dte_bucket)
+    fetch_times = [r.get("fetch_time") for r in rows if r.get("fetch_time") is not None]
+    if not fetch_times:
+        return {"latest_fetch_time": None, "latest_trade_date": None}
+    latest = max(fetch_times)
+    latest_date = latest.date() if hasattr(latest, "date") else None
+    return {
+        "latest_fetch_time": latest.isoformat() if hasattr(latest, "isoformat") else str(latest),
+        "latest_trade_date": latest_date.isoformat() if hasattr(latest_date, "isoformat") else str(latest_date) if latest_date else None,
+    }
+
+
 def get_current_atm_iv(engine: Engine, underlying_id: str) -> Optional[float]:
     return get_current_representative_ivs(engine, underlying_id).get("atm")
 
@@ -247,42 +321,51 @@ def _fetch_trading_day_series(
     option_side: str,
     abs_delta_target: float,
     lookback_days: int,
+    max_history_days: int = 180,
+    dte_bucket: str = "near",
 ) -> List[tuple[Any, float]]:
+    ensure_manual_non_trading_days_table(engine)
     option_type_filter = "('CALL', 'C')" if option_side == "CALL" else "('PUT', 'P')"
+    bucket, dte_min, dte_max, target_dte = _resolve_dte_bucket(dte_bucket)
     sql = text(
         f"""
-        WITH recent_dates AS (
-            SELECT trade_date
-            FROM (
-                SELECT DISTINCT DATE(fetch_time) AS trade_date
-                FROM option_factor_snapshots
-                WHERE underlying_id = :underlying_id
-            ) d
-            ORDER BY trade_date DESC
-            LIMIT :lookback_days
-        ),
-        ranked AS (
+        WITH ranked AS (
             SELECT
                 DATE(o.fetch_time) AS trade_date,
                 o.implied_vol,
                 ROW_NUMBER() OVER (
                     PARTITION BY DATE(o.fetch_time)
-                    ORDER BY o.dte_calendar ASC, ABS(ABS(o.delta) - :abs_delta_target) ASC
+                    ORDER BY
+                        o.fetch_time DESC,
+                        ABS(o.dte_calendar - :target_dte) ASC,
+                        ABS(ABS(o.delta) - :abs_delta_target) ASC
                 ) AS rn
             FROM option_factor_snapshots o
-            JOIN recent_dates d
-              ON DATE(o.fetch_time) = d.trade_date
             WHERE o.underlying_id = :underlying_id
+              AND DATE(o.fetch_time) >= CURRENT_DATE - CAST(:lookback_days AS INTEGER)
+              AND EXTRACT(ISODOW FROM DATE(o.fetch_time)) BETWEEN 1 AND 5
               AND o.option_type IN {option_type_filter}
               AND o.delta IS NOT NULL
               AND o.implied_vol IS NOT NULL
               AND o.implied_vol > :min_valid_iv
               AND o.implied_vol < :max_valid_iv
-              AND o.dte_calendar > :min_dte
+              AND o.dte_calendar >= :dte_min
+              AND o.dte_calendar <= :dte_max
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM manual_non_trading_days nt
+                  WHERE nt.trade_date = DATE(o.fetch_time)
+              )
+        ),
+        selected AS (
+            SELECT trade_date, implied_vol
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY trade_date DESC
+            LIMIT :max_history_days
         )
         SELECT trade_date, implied_vol
-        FROM ranked
-        WHERE rn = 1
+        FROM selected
         ORDER BY trade_date ASC
         """
     )
@@ -292,19 +375,29 @@ def _fetch_trading_day_series(
             {
                 "underlying_id": underlying_id,
                 "lookback_days": lookback_days,
+                "max_history_days": max_history_days,
                 "abs_delta_target": abs_delta_target,
+                "target_dte": target_dte,
                 "min_valid_iv": _MIN_VALID_IV,
                 "max_valid_iv": _MAX_VALID_IV,
-                "min_dte": _MIN_DTE,
+                "dte_min": dte_min,
+                "dte_max": dte_max,
             },
         ).fetchall()
+    if not rows:
+        print(
+            f"[iv_percentile] uid={underlying_id} empty_history "
+            f"side={option_side} bucket={bucket}"
+        )
     return [(r[0], float(r[1])) for r in rows if r[1] is not None]
 
 
 def fetch_historical_atm_iv(
     engine: Engine,
     underlying_id: str,
-    lookback_days: int = 90,
+    lookback_days: int = 270,
+    max_history_days: int = 180,
+    dte_bucket: str = "near",
 ) -> List[float]:
     try:
         call_series = _fetch_trading_day_series(
@@ -313,6 +406,8 @@ def fetch_historical_atm_iv(
             option_side="CALL",
             abs_delta_target=_ATM_TARGET_ABS_DELTA,
             lookback_days=lookback_days,
+            max_history_days=max_history_days,
+            dte_bucket=dte_bucket,
         )
         put_series = _fetch_trading_day_series(
             engine=engine,
@@ -320,6 +415,8 @@ def fetch_historical_atm_iv(
             option_side="PUT",
             abs_delta_target=_ATM_TARGET_ABS_DELTA,
             lookback_days=lookback_days,
+            max_history_days=max_history_days,
+            dte_bucket=dte_bucket,
         )
 
         call_map = {trade_date: iv for trade_date, iv in call_series}
@@ -338,16 +435,26 @@ def fetch_historical_atm_iv(
 def fetch_historical_representative_ivs(
     engine: Engine,
     underlying_id: str,
-    lookback_days: int = 90,
+    lookback_days: int = 270,
+    max_history_days: int = 180,
+    dte_bucket: str = "near",
 ) -> Dict[str, List[float]]:
     try:
-        atm_history = fetch_historical_atm_iv(engine, underlying_id, lookback_days)
+        atm_history = fetch_historical_atm_iv(
+            engine,
+            underlying_id,
+            lookback_days=lookback_days,
+            max_history_days=max_history_days,
+            dte_bucket=dte_bucket,
+        )
         call_history = _fetch_trading_day_series(
             engine=engine,
             underlying_id=underlying_id,
             option_side="CALL",
             abs_delta_target=_CALL_TARGET_ABS_DELTA,
             lookback_days=lookback_days,
+            max_history_days=max_history_days,
+            dte_bucket=dte_bucket,
         )
         put_history = _fetch_trading_day_series(
             engine=engine,
@@ -355,6 +462,8 @@ def fetch_historical_representative_ivs(
             option_side="PUT",
             abs_delta_target=_PUT_TARGET_ABS_DELTA,
             lookback_days=lookback_days,
+            max_history_days=max_history_days,
+            dte_bucket=dte_bucket,
         )
         return {
             "atm": atm_history,
@@ -371,11 +480,19 @@ def calc_iv_percentile(
     underlying_id: str,
     engine: Optional[Engine] = None,
     historical_ivs: Optional[List[float]] = None,
-    lookback_days: int = 90,
+    lookback_days: int = 270,
+    max_history_days: int = 180,
+    dte_bucket: str = "near",
     min_history_days: int = 10,
 ) -> Dict[str, Any]:
     if historical_ivs is None and engine is not None:
-        historical_ivs = fetch_historical_atm_iv(engine, underlying_id, lookback_days)
+        historical_ivs = fetch_historical_atm_iv(
+            engine,
+            underlying_id,
+            lookback_days=lookback_days,
+            max_history_days=max_history_days,
+            dte_bucket=dte_bucket,
+        )
     if historical_ivs is None:
         historical_ivs = []
 
@@ -384,6 +501,11 @@ def calc_iv_percentile(
         underlying_id=underlying_id,
         historical_ivs=historical_ivs,
         dimension="atm",
+        dte_bucket=dte_bucket,
+        dte_min=_resolve_dte_bucket(dte_bucket)[1],
+        dte_max=_resolve_dte_bucket(dte_bucket)[2],
+        lookback_days=lookback_days,
+        max_history_days=max_history_days,
         min_history_days=min_history_days,
     )
     payload["underlying_id"] = underlying_id
@@ -393,12 +515,16 @@ def calc_iv_percentile(
 def build_iv_percentile_report(
     engine: Engine,
     underlying_id: str,
-    lookback_days: int = 90,
+    lookback_days: int = 270,
+    max_history_days: int = 180,
+    dte_bucket: str = "near",
 ) -> Optional[Dict[str, Any]]:
     t0_all = time.perf_counter()
+    bucket, dte_min, dte_max, _ = _resolve_dte_bucket(dte_bucket)
 
     t0 = time.perf_counter()
-    current_ivs = get_current_representative_ivs(engine, underlying_id)
+    current_ivs = get_current_representative_ivs(engine, underlying_id, dte_bucket=bucket)
+    latest_metadata = _latest_snapshot_metadata(engine, underlying_id, dte_bucket=bucket)
     print(f"[timing] {underlying_id} get_current_atm_iv = {time.perf_counter() - t0:.3f}s")
 
     current_atm = current_ivs.get("atm")
@@ -417,6 +543,8 @@ def build_iv_percentile_report(
         engine=engine,
         underlying_id=underlying_id,
         lookback_days=lookback_days,
+        max_history_days=max_history_days,
+        dte_bucket=bucket,
     )
     print(
         f"[iv_pct_sample] uid={underlying_id} sample_mode=trading_day "
@@ -428,6 +556,11 @@ def build_iv_percentile_report(
         underlying_id=underlying_id,
         historical_ivs=history["atm"],
         dimension="atm",
+        dte_bucket=bucket,
+        dte_min=dte_min,
+        dte_max=dte_max,
+        lookback_days=lookback_days,
+        max_history_days=max_history_days,
     )
 
     current_call = current_ivs.get("call")
@@ -437,6 +570,11 @@ def build_iv_percentile_report(
             underlying_id=underlying_id,
             historical_ivs=history["call"],
             dimension="call",
+            dte_bucket=bucket,
+            dte_min=dte_min,
+            dte_max=dte_max,
+            lookback_days=lookback_days,
+            max_history_days=max_history_days,
         )
         if current_call is not None
         else None
@@ -449,6 +587,11 @@ def build_iv_percentile_report(
             underlying_id=underlying_id,
             historical_ivs=history["put"],
             dimension="put",
+            dte_bucket=bucket,
+            dte_min=dte_min,
+            dte_max=dte_max,
+            lookback_days=lookback_days,
+            max_history_days=max_history_days,
         )
         if current_put is not None
         else None
@@ -456,6 +599,14 @@ def build_iv_percentile_report(
 
     report = {
         "underlying_id": underlying_id,
+        "dte_bucket": bucket,
+        "dte_min": dte_min,
+        "dte_max": dte_max,
+        "latest_fetch_time": latest_metadata["latest_fetch_time"],
+        "latest_trade_date": latest_metadata["latest_trade_date"],
+        "lookback_days": lookback_days,
+        "max_history_days": max_history_days,
+        "sample_method": _SAMPLE_METHOD,
         # legacy-compatible top-level ATM fields
         "current_iv": atm_report["current_iv"],
         "composite_percentile": atm_report["composite_percentile"],
@@ -464,6 +615,9 @@ def build_iv_percentile_report(
         "hist_weight": atm_report["hist_weight"],
         "prior_weight": atm_report["prior_weight"],
         "history_days": atm_report["history_days"],
+        "atm_percentile": atm_report["composite_percentile"],
+        "call_percentile": call_report["composite_percentile"] if call_report else None,
+        "put_percentile": put_report["composite_percentile"] if put_report else None,
         "label": atm_report["label"],
         "label_en": atm_report["label_en"],
         "strategy_hints": atm_report["strategy_hints"],

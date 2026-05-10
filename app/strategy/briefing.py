@@ -281,8 +281,9 @@ def _format_strategy_legs(strategy: Any) -> str:
         strike = _format_leg_value(getattr(leg, "strike", None))
         expiry = _format_leg_value(getattr(leg, "expiry_date", None))
         delta = _format_leg_value(getattr(leg, "delta", None), digits=3)
+        iv = _format_leg_value(getattr(leg, "iv", None), digits=3)
         mid = _format_leg_value(getattr(leg, "mid", None), digits=4)
-        leg_texts.append(f"{action}{option_type} K={strike} {expiry} Δ={delta} mid={mid}")
+        leg_texts.append(f"{action}{option_type} K={strike} {expiry} Δ={delta} IV={iv} mid={mid}")
 
     return " / ".join(leg_texts)
 
@@ -311,6 +312,7 @@ def _strategy_to_table_row(
 ) -> Dict[str, Any]:
     greeks_report = _get_greeks_report(strategy)
     greeks = greeks_report.get("net_greeks", {}) or {}
+    risk_greeks = greeks_report.get("risk_greeks", {}) or {}
     iv_ctx = _build_strategy_iv_context(strategy, greeks_report)
     score = float(getattr(strategy, "score", 0.0) or 0.0)
     legs = getattr(strategy, "legs", []) or []
@@ -335,6 +337,17 @@ def _strategy_to_table_row(
         "net_delta": _safe_round(greeks.get("net_delta")),
         "net_vega": _safe_round(greeks.get("net_vega")),
         "net_theta": _safe_round(greeks.get("net_theta")),
+        "raw_net_delta": _safe_round(greeks.get("net_delta")),
+        "raw_net_gamma": _safe_round(greeks.get("net_gamma")),
+        "raw_net_vega": _safe_round(greeks.get("net_vega")),
+        "raw_net_theta": _safe_round(greeks.get("net_theta")),
+        "delta_share_equiv": risk_greeks.get("delta_share_equiv"),
+        "delta_rmb_per_1pct": risk_greeks.get("delta_rmb_per_1pct"),
+        "theta_rmb_per_day": risk_greeks.get("theta_rmb_per_day"),
+        "vega_rmb_per_1vol": risk_greeks.get("vega_rmb_per_1vol"),
+        "gamma_rmb_per_1pct_move": risk_greeks.get("gamma_rmb_per_1pct_move"),
+        "gamma_rmb_per_1pct_move_approximate": risk_greeks.get("gamma_rmb_per_1pct_move_approximate"),
+        "contract_multiplier": risk_greeks.get("contract_multiplier"),
         "iv_label": iv_ctx["atm_iv_label"],
         "iv_pct": iv_ctx["atm_iv_pct"],
         "atm_iv_pct": iv_ctx["atm_iv_pct"],
@@ -531,10 +544,14 @@ def _risk_sentence(row: Optional[Dict[str, Any]]) -> str:
     flags = row.get("risk_flags") or []
     theta = row.get("net_theta")
     delta = row.get("net_delta")
+    delta_share_equiv = row.get("delta_share_equiv")
+    theta_rmb_per_day = row.get("theta_rmb_per_day")
     if flags:
         return f"风险上需关注 {', '.join(str(flag) for flag in flags[:3])}。"
     if theta is not None and float(theta) < 0:
         return "该结构 theta 为负，若标的未按预期移动，时间流逝会形成拖累。"
+    if delta_share_equiv is not None or theta_rmb_per_day is not None:
+        return f"主要监控 delta等价={delta_share_equiv}份、theta={theta_rmb_per_day} RMB/day 以及成交价差变化。"
     return f"主要监控 delta={delta}、theta={theta} 以及成交价差变化。"
 
 

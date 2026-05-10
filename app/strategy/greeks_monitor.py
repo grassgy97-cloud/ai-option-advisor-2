@@ -14,6 +14,8 @@ from sqlalchemy.engine import Engine
 from app.models.schemas import ResolvedStrategy
 from app.strategy.iv_percentile import build_iv_percentile_report
 
+CONTRACT_MULTIPLIER = 10000
+
 
 def _leg_sign(action: str) -> int:
     return 1 if action == "BUY" else -1
@@ -49,6 +51,38 @@ def compute_strategy_net_greeks(strategy: ResolvedStrategy) -> Dict[str, float |
         "net_gamma": round(net_gamma, 6) if has_gamma else None,
         "net_theta": round(net_theta, 6) if has_theta else None,
         "net_vega": round(net_vega, 6) if has_vega else None,
+    }
+
+
+def compute_strategy_risk_greeks(
+    strategy: ResolvedStrategy,
+    net_greeks: Optional[Dict[str, float | None]] = None,
+) -> Dict[str, float | None]:
+    net_greeks = net_greeks or compute_strategy_net_greeks(strategy)
+    spot = strategy.spot_price
+
+    net_delta = net_greeks.get("net_delta")
+    net_gamma = net_greeks.get("net_gamma")
+    net_theta = net_greeks.get("net_theta")
+    net_vega = net_greeks.get("net_vega")
+
+    gamma_rmb_per_1pct_move = None
+    if net_gamma is not None and spot is not None and spot > 0:
+        move = spot * 0.01
+        gamma_rmb_per_1pct_move = 0.5 * net_gamma * move * move * CONTRACT_MULTIPLIER
+
+    return {
+        "contract_multiplier": CONTRACT_MULTIPLIER,
+        "delta_share_equiv": round(net_delta * CONTRACT_MULTIPLIER, 2) if net_delta is not None else None,
+        "delta_rmb_per_1pct": (
+            round(net_delta * CONTRACT_MULTIPLIER * spot * 0.01, 2)
+            if net_delta is not None and spot is not None
+            else None
+        ),
+        "theta_rmb_per_day": round(net_theta * CONTRACT_MULTIPLIER, 2) if net_theta is not None else None,
+        "vega_rmb_per_1vol": round(net_vega * CONTRACT_MULTIPLIER * 0.01, 2) if net_vega is not None else None,
+        "gamma_rmb_per_1pct_move": round(gamma_rmb_per_1pct_move, 2) if gamma_rmb_per_1pct_move is not None else None,
+        "gamma_rmb_per_1pct_move_approximate": gamma_rmb_per_1pct_move is not None,
     }
 
 
@@ -169,11 +203,13 @@ def build_strategy_greeks_report(
         except Exception as exc:
             print(f"[greeks_monitor] iv_percentile failed: {exc}")
 
+    raw_net_greeks = compute_strategy_net_greeks(strategy)
     report: Dict[str, Any] = {
         "strategy_type": strategy.strategy_type,
         "underlying_id": strategy.underlying_id,
         "spot_price": strategy.spot_price,
-        "net_greeks": compute_strategy_net_greeks(strategy),
+        "net_greeks": raw_net_greeks,
+        "risk_greeks": compute_strategy_risk_greeks(strategy, raw_net_greeks),
         "risk_flags": build_risk_flags(strategy),
         "commentary": build_greeks_commentary(strategy, final_iv_pct_report),
     }
